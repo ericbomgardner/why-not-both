@@ -126,6 +126,11 @@ class CameraManager: ObservableObject {
       device: frontDevice, output: frontOutput, preview: frontPreview, to: session,
       failure: .frontCameraUnavailable)
 
+    adoptWidestFormat(for: backDevice, in: session)
+    useLargestStill(from: backDevice.activeFormat, for: backOutput)
+    // The PiP is 3:4, so a 4:3 front source fills it without cropping the selfie.
+    adoptWidestFormat(for: frontDevice, in: session)
+
     return SessionSetup(
       session: session,
       backDevice: backDevice,
@@ -134,6 +139,54 @@ class CameraManager: ObservableObject {
       frontOutput: frontOutput,
       photoAspectRatio: aspectRatioOfPhoto(from: backOutput, device: backDevice)
     )
+  }
+
+  // A 16:9 multi-cam format is a crop of the sensor's 4:3 readout, so the default costs field of
+  // view. Multi-cam budgets both cameras together, so anything that overruns is put back.
+  private nonisolated static func adoptWidestFormat(
+    for device: AVCaptureDevice, in session: AVCaptureMultiCamSession
+  ) {
+    let original = device.activeFormat
+    let candidates =
+      device.formats
+      .filter(\.isMultiCamSupported)
+      .filter { isFourThree(CMVideoFormatDescriptionGetDimensions($0.formatDescription)) }
+      .sorted { pixelCount(of: $0) > pixelCount(of: $1) }
+
+    guard !candidates.isEmpty, (try? device.lockForConfiguration()) != nil else { return }
+    defer { device.unlockForConfiguration() }
+
+    for candidate in candidates {
+      device.activeFormat = candidate
+      if session.hardwareCost <= 1 && session.systemPressureCost <= 1 {
+        return
+      }
+    }
+
+    device.activeFormat = original
+  }
+
+  // maxPhotoDimensions defaults to the format's smallest still, which is a fraction of what the
+  // same format will actually give.
+  private nonisolated static func useLargestStill(
+    from format: AVCaptureDevice.Format, for output: AVCapturePhotoOutput
+  ) {
+    let largest = format.supportedMaxPhotoDimensions.max {
+      Int($0.width) * Int($0.height) < Int($1.width) * Int($1.height)
+    }
+    guard let largest else { return }
+    output.maxPhotoDimensions = largest
+  }
+
+  private nonisolated static func isFourThree(_ dimensions: CMVideoDimensions) -> Bool {
+    guard dimensions.width > 0, dimensions.height > 0 else { return false }
+    let aspect = CGFloat(dimensions.width) / CGFloat(dimensions.height)
+    return abs(aspect - 4.0 / 3.0) < 0.01
+  }
+
+  private nonisolated static func pixelCount(of format: AVCaptureDevice.Format) -> Int {
+    let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+    return Int(dimensions.width) * Int(dimensions.height)
   }
 
   // The still can differ in shape from the video format, and it's the still the mask describes.
@@ -290,6 +343,7 @@ class CameraManager: ObservableObject {
     let settings = AVCapturePhotoSettings()
     settings.flashMode = .off
     settings.photoQualityPrioritization = output.maxPhotoQualityPrioritization
+    settings.maxPhotoDimensions = output.maxPhotoDimensions
     let id = settings.uniqueID
 
     let image = await withCheckedContinuation { continuation in
