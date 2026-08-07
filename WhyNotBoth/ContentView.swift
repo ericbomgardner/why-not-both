@@ -26,18 +26,24 @@ struct ContentView: View {
         if cameraManager.isSessionConfigured {
           let frame = viewfinderSize(in: geometry.size)
 
-          if isLandscape(geometry.size) {
-            HStack(spacing: 0) {
-              viewfinder(frame)
-              shutterButton(framing: framing(in: frame))
-                .frame(width: controlStripThickness)
-            }
-          } else {
-            VStack(spacing: 0) {
-              viewfinder(frame)
-              shutterButton(framing: framing(in: frame))
-                .frame(height: controlStripThickness)
-            }
+          let landscape = isLandscape(geometry.size)
+          // AnyLayout rather than branching on a stack: an if/else here would be two different
+          // views, so rotating mid-drag would destroy the gesture before it could snap the PiP.
+          let layout =
+            landscape
+            ? AnyLayout(HStackLayout(spacing: 0)) : AnyLayout(VStackLayout(spacing: 0))
+
+          layout {
+            viewfinder(frame)
+            shutterButton(framing: framing(in: frame))
+              .frame(
+                width: landscape ? controlStripThickness : nil,
+                height: landscape ? nil : controlStripThickness
+              )
+          }
+          .onChange(of: frame) { _, _ in
+            isDraggingPiP = false
+            dragTranslation = .zero
           }
         } else {
           statusView
