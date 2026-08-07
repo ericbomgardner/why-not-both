@@ -1,6 +1,6 @@
 // Checks that the mask tells the truth: what the viewfinder frames is what gets saved, at every
-// capture aspect and PiP corner, in both orientations. Multi-cam won't run in the simulator, so
-// this is how the layout arithmetic gets exercised without a device.
+// capture aspect and PiP corner. Multi-cam won't run in the simulator, so this is how the layout
+// arithmetic gets exercised without a device.
 // Usage: swiftc -o /tmp/check-viewfinder WhyNotBoth/PiPLayout.swift Tools/CheckViewfinderGeometry.swift && /tmp/check-viewfinder
 
 import CoreGraphics
@@ -9,26 +9,13 @@ import Foundation
 // Mirrors ContentView. Kept in step by hand — these are the numbers the view lays out from.
 let shutterDiameter: CGFloat = 80
 let shutterMargin: CGFloat = 24
-let minControlThickness = shutterDiameter + shutterMargin * 2
-
-func isLandscape(_ container: CGSize) -> Bool { container.width > container.height }
+let controlStripThickness = shutterDiameter + shutterMargin * 2
 
 func viewfinderSize(in container: CGSize, aspect: CGFloat) -> CGSize {
   guard container.width > 0, container.height > 0, aspect > 0 else { return .zero }
 
-  if isLandscape(container) {
-    let width = min(container.height * aspect, max(container.width - minControlThickness, 0))
-    return CGSize(width: width, height: width / aspect)
-  }
-
-  let height = min(container.width / aspect, max(container.height - minControlThickness, 0))
+  let height = min(container.width / aspect, max(container.height - controlStripThickness, 0))
   return CGSize(width: container.width, height: height)
-}
-
-func controlThickness(in container: CGSize, frame: CGSize) -> CGFloat {
-  let leftover =
-    isLandscape(container) ? container.width - frame.width : container.height - frame.height
-  return max(leftover, minControlThickness)
 }
 
 // Mirrors CameraManager.composite.
@@ -62,38 +49,30 @@ func check(_ name: String, _ passed: Bool, _ detail: String) {
   if !passed { failures.append(name) }
 }
 
-// iPhone 15 Pro safe areas, and the two capture shapes multi-cam offers.
-let portraitSafeArea = CGSize(width: 393, height: 852 - 59 - 34)
-let landscapeSafeArea = CGSize(width: 852 - 59 * 2, height: 393 - 21)
-let fourThree = CGSize(width: 4032, height: 3024)
-let sixteenNine = CGSize(width: 1920, height: 1080)
+// The app is portrait-locked, so the container is always the portrait safe area. 4:3 is what
+// format selection asks for; 16:9 is what a device that can't afford it falls back to.
+let safeArea = CGSize(width: 393, height: 852 - 59 - 34)
+let fourThreePhoto = CGSize(width: 3024, height: 4032)
+let sixteenNinePhoto = CGSize(width: 1080, height: 1920)
 
-// A device held portrait captures a portrait-shaped still, and vice versa.
-let cases: [(String, CGSize, CGFloat, CGSize)] = [
-  (
-    "portrait-4:3", portraitSafeArea, fourThree.height / fourThree.width,
-    CGSize(width: 3024, height: 4032)
-  ),
-  (
-    "portrait-16:9", portraitSafeArea, sixteenNine.height / sixteenNine.width,
-    CGSize(width: 1080, height: 1920)
-  ),
-  ("landscape-4:3", landscapeSafeArea, fourThree.width / fourThree.height, fourThree),
-  ("landscape-16:9", landscapeSafeArea, sixteenNine.width / sixteenNine.height, sixteenNine),
+let cases: [(String, CGFloat, CGSize)] = [
+  ("4:3", fourThreePhoto.width / fourThreePhoto.height, fourThreePhoto),
+  ("16:9", sixteenNinePhoto.width / sixteenNinePhoto.height, sixteenNinePhoto),
 ]
 
 @main
 enum CheckViewfinderGeometry {
   static func main() {
-    for (name, safeArea, aspect, photo) in cases {
-      run(name: name, safeArea: safeArea, aspect: aspect, photo: photo)
+    for (name, aspect, photo) in cases {
+      run(name: name, aspect: aspect, photo: photo)
     }
 
-    sameSceneEitherWayUp()
+    fourThreeKeepsTheWholeSensorFrame()
+    pipHoldsItsShapeInEitherFrame()
 
     // Dropping the PiP nearest a corner selects that corner.
     for corner in PiPCorner.allCases {
-      let frame = viewfinderSize(in: portraitSafeArea, aspect: 0.75)
+      let frame = viewfinderSize(in: safeArea, aspect: 0.75)
       let center = PiPLayout.center(for: corner, in: frame)
       check(
         "\(corner) snaps to itself",
@@ -105,120 +84,100 @@ enum CheckViewfinderGeometry {
     exit(failures.isEmpty ? 0 : 1)
   }
 
-  // Turning the phone must not change what the camera captures, only which way round it is.
-  static func sameSceneEitherWayUp() {
-    let portraitPhoto = CGSize(width: 3024, height: 4032)
-    let landscapePhoto = CGSize(width: 4032, height: 3024)
-
-    let portraitFrame = viewfinderSize(
-      in: portraitSafeArea, aspect: portraitPhoto.width / portraitPhoto.height)
-    let landscapeFrame = viewfinderSize(
-      in: landscapeSafeArea, aspect: landscapePhoto.width / landscapePhoto.height)
-
-    let (portraitCanvas, _) = canvasAndPiP(
-      viewfinder: portraitFrame, photo: portraitPhoto,
-      pipRect: PiPLayout.rect(for: .topTrailing, in: portraitFrame))
-    let (landscapeCanvas, _) = canvasAndPiP(
-      viewfinder: landscapeFrame, photo: landscapePhoto,
-      pipRect: PiPLayout.rect(for: .topTrailing, in: landscapeFrame))
+  // The whole point of choosing a 4:3 format: the frame fits it exactly, so nothing is cropped.
+  static func fourThreeKeepsTheWholeSensorFrame() {
+    let frame = viewfinderSize(
+      in: safeArea, aspect: fourThreePhoto.width / fourThreePhoto.height)
+    let (canvas, _) = canvasAndPiP(
+      viewfinder: frame, photo: fourThreePhoto,
+      pipRect: PiPLayout.rect(for: .topTrailing, in: frame))
 
     check(
-      "portrait saves the whole sensor frame",
-      portraitCanvas == portraitPhoto,
-      "canvas \(portraitCanvas) vs photo \(portraitPhoto)")
+      "4:3 saves the whole sensor frame",
+      canvas == fourThreePhoto,
+      "canvas \(canvas) vs photo \(fourThreePhoto)")
+  }
+
+  // PiPLayout is measured off the short edge so it can't balloon if it ever meets a wide frame.
+  static func pipHoldsItsShapeInEitherFrame() {
+    let tall = CGSize(width: 393, height: 524)
+    let wide = CGSize(width: 524, height: 393)
+    let tallPiP = PiPLayout.size(in: tall)
+    let widePiP = PiPLayout.size(in: wide)
+
+    let tallShare = (tallPiP.width * tallPiP.height) / (tall.width * tall.height)
+    let wideShare = (widePiP.width * widePiP.height) / (wide.width * wide.height)
 
     check(
-      "landscape saves the whole sensor frame",
-      landscapeCanvas == landscapePhoto,
-      "canvas \(landscapeCanvas) vs photo \(landscapePhoto)")
-
-    check(
-      "both orientations capture the same area",
-      portraitCanvas.width * portraitCanvas.height
-        == landscapeCanvas.width * landscapeCanvas.height,
-      "portrait \(portraitCanvas) vs landscape \(landscapeCanvas)")
-
-    // The PiP shouldn't balloon just because the frame turned on its side.
-    let portraitPiP = PiPLayout.size(in: portraitFrame)
-    let landscapePiP = PiPLayout.size(in: landscapeFrame)
-    let portraitShare =
-      (portraitPiP.width * portraitPiP.height) / (portraitFrame.width * portraitFrame.height)
-    let landscapeShare =
-      (landscapePiP.width * landscapePiP.height) / (landscapeFrame.width * landscapeFrame.height)
-
-    check(
-      "pip covers a similar share of the frame either way up",
-      approx(portraitShare, landscapeShare, 0.02),
-      "portrait \(round(portraitShare * 1000) / 10)% vs landscape \(round(landscapeShare * 1000) / 10)%")
+      "pip covers a similar share of either frame",
+      approx(tallShare, wideShare, 0.02),
+      "tall \(round(tallShare * 1000) / 10)% vs wide \(round(wideShare * 1000) / 10)%")
 
     check(
       "pip turns with the frame",
-      portraitPiP.width < portraitPiP.height && landscapePiP.width > landscapePiP.height,
-      "portrait \(portraitPiP) landscape \(landscapePiP)")
+      tallPiP.width < tallPiP.height && widePiP.width > widePiP.height,
+      "tall \(tallPiP) wide \(widePiP)")
   }
 
-  static func run(name: String, safeArea: CGSize, aspect: CGFloat, photo: CGSize) {
+  static func run(name: String, aspect: CGFloat, photo: CGSize) {
     let frame = viewfinderSize(in: safeArea, aspect: aspect)
-    let controls = controlThickness(in: safeArea, frame: frame)
 
-  // Frame plus controls account for the container, so the leftover is control area, not a bar.
-  let consumed = isLandscape(safeArea) ? frame.width + controls : frame.height + controls
-  let extent = isLandscape(safeArea) ? safeArea.width : safeArea.height
-  check(
-    "\(name) frame and controls fill the container",
-    consumed <= extent + 0.01 && controls >= minControlThickness - 0.01,
-    "frame+controls \(consumed) vs container \(extent), controls \(controls)")
-
-  check(
-    "\(name) frame fits the container",
-    frame.width <= safeArea.width + 0.01 && frame.height <= safeArea.height + 0.01,
-    "frame \(frame) in \(safeArea)")
-
-  for corner in PiPCorner.allCases {
-    let pip = PiPLayout.rect(for: corner, in: frame)
-    let (canvas, mapped) = canvasAndPiP(viewfinder: frame, photo: photo, pipRect: pip)
-
-    // What's saved is shaped like the frame, and is a crop of a real photo.
+    // No bars down the sides, and the controls always have their room.
     check(
-      "\(name) \(corner) saved shape matches the frame",
-      approx(canvas.width / canvas.height, frame.width / frame.height, 0.001),
-      "canvas aspect \(canvas.width / canvas.height) vs frame \(frame.width / frame.height)")
+      "\(name) frame fills the width",
+      approx(frame.width, safeArea.width),
+      "frame width \(frame.width) vs container \(safeArea.width)")
 
     check(
-      "\(name) \(corner) saved area is within the photo",
-      canvas.width <= photo.width + 0.01 && canvas.height <= photo.height + 0.01,
-      "canvas \(canvas.width)x\(canvas.height) vs photo \(photo.width)x\(photo.height)")
+      "\(name) frame leaves room for the controls",
+      frame.height <= safeArea.height - controlStripThickness + 0.01,
+      "frame height \(frame.height) vs \(safeArea.height - controlStripThickness)")
 
-    // The PiP holds its size and its distance from every edge, on screen and in the file.
-    check(
-      "\(name) \(corner) pip width fraction",
-      approx(pip.width / frame.width, mapped.width / canvas.width, 0.0001),
-      "frame \(pip.width / frame.width) vs saved \(mapped.width / canvas.width)")
+    for corner in PiPCorner.allCases {
+      let pip = PiPLayout.rect(for: corner, in: frame)
+      let (canvas, mapped) = canvasAndPiP(viewfinder: frame, photo: photo, pipRect: pip)
 
-    let frameGaps = [
-      pip.minX / frame.width, (frame.width - pip.maxX) / frame.width,
-      pip.minY / frame.height, (frame.height - pip.maxY) / frame.height,
-    ]
-    let savedGaps = [
-      mapped.minX / canvas.width, (canvas.width - mapped.maxX) / canvas.width,
-      mapped.minY / canvas.height, (canvas.height - mapped.maxY) / canvas.height,
-    ]
-    check(
-      "\(name) \(corner) pip edge gaps",
-      zip(frameGaps, savedGaps).allSatisfy { approx($0, $1, 0.0001) },
-      "frame \(frameGaps.map { round($0 * 1000) / 1000 }) "
-        + "saved \(savedGaps.map { round($0 * 1000) / 1000 })")
+      // What's saved is shaped like the frame, and is a crop of a real photo.
+      check(
+        "\(name) \(corner) saved shape matches the frame",
+        approx(canvas.width / canvas.height, frame.width / frame.height, 0.001),
+        "canvas aspect \(canvas.width / canvas.height) vs frame \(frame.width / frame.height)")
 
-    // A drag that runs off the screen still leaves the PiP inside the frame, so it can't be
-    // dropped somewhere it wouldn't be saved.
-    for runaway in [CGSize(width: -9999, height: -9999), CGSize(width: 9999, height: 9999)] {
-      let translation = clamped(runaway, from: corner, in: frame)
-      let anchor = PiPLayout.center(for: corner, in: frame)
-      let size = PiPLayout.size(in: frame)
-      let origin = CGPoint(
-        x: anchor.x + translation.width - size.width / 2,
-        y: anchor.y + translation.height - size.height / 2)
-      let dragged = CGRect(origin: origin, size: size)
+      check(
+        "\(name) \(corner) saved area is within the photo",
+        canvas.width <= photo.width + 0.01 && canvas.height <= photo.height + 0.01,
+        "canvas \(canvas.width)x\(canvas.height) vs photo \(photo.width)x\(photo.height)")
+
+      // The PiP holds its size and its distance from every edge, on screen and in the file.
+      check(
+        "\(name) \(corner) pip width fraction",
+        approx(pip.width / frame.width, mapped.width / canvas.width, 0.0001),
+        "frame \(pip.width / frame.width) vs saved \(mapped.width / canvas.width)")
+
+      let frameGaps = [
+        pip.minX / frame.width, (frame.width - pip.maxX) / frame.width,
+        pip.minY / frame.height, (frame.height - pip.maxY) / frame.height,
+      ]
+      let savedGaps = [
+        mapped.minX / canvas.width, (canvas.width - mapped.maxX) / canvas.width,
+        mapped.minY / canvas.height, (canvas.height - mapped.maxY) / canvas.height,
+      ]
+      check(
+        "\(name) \(corner) pip edge gaps",
+        zip(frameGaps, savedGaps).allSatisfy { approx($0, $1, 0.0001) },
+        "frame \(frameGaps.map { round($0 * 1000) / 1000 }) "
+          + "saved \(savedGaps.map { round($0 * 1000) / 1000 })")
+
+      // A drag that runs off the screen still leaves the PiP inside the frame, so it can't be
+      // dropped somewhere it wouldn't be saved.
+      for runaway in [CGSize(width: -9999, height: -9999), CGSize(width: 9999, height: 9999)] {
+        let translation = clamped(runaway, from: corner, in: frame)
+        let anchor = PiPLayout.center(for: corner, in: frame)
+        let size = PiPLayout.size(in: frame)
+        let origin = CGPoint(
+          x: anchor.x + translation.width - size.width / 2,
+          y: anchor.y + translation.height - size.height / 2)
+        let dragged = CGRect(origin: origin, size: size)
 
         check(
           "\(name) \(corner) runaway drag stays in frame",

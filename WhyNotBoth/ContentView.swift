@@ -16,7 +16,7 @@ struct ContentView: View {
   private let shutterDiameter: CGFloat = 80
   private let shutterMargin: CGFloat = 24
 
-  private var minControlThickness: CGFloat { shutterDiameter + shutterMargin * 2 }
+  private var controlStripThickness: CGFloat { shutterDiameter + shutterMargin * 2 }
 
   var body: some View {
     GeometryReader { geometry in
@@ -26,21 +26,10 @@ struct ContentView: View {
         if cameraManager.isSessionConfigured {
           let frame = viewfinderSize(in: geometry.size)
 
-          let landscape = isLandscape(geometry.size)
-          let controls = controlThickness(in: geometry.size, frame: frame)
-          // AnyLayout rather than branching on a stack: an if/else here would be two different
-          // views, so rotating mid-drag would destroy the gesture before it could snap the PiP.
-          let layout =
-            landscape
-            ? AnyLayout(HStackLayout(spacing: 0)) : AnyLayout(VStackLayout(spacing: 0))
-
-          layout {
+          VStack(spacing: 0) {
             viewfinder(frame)
             shutterButton(framing: framing(in: frame))
-              .frame(
-                width: landscape ? controls : nil,
-                height: landscape ? nil : controls
-              )
+              .frame(height: controlStripThickness)
           }
           .onChange(of: frame) { _, _ in
             isDraggingPiP = false
@@ -85,30 +74,14 @@ struct ContentView: View {
     .statusBarHidden()
   }
 
-  private func isLandscape(_ container: CGSize) -> Bool {
-    container.width > container.height
-  }
-
-  // The frame keeps the capture's own shape, so the same scene is saved whichever way the phone is
-  // held. Whatever space is left over becomes the control area rather than a black bar.
+  // The frame keeps the capture's own shape, centred in the space above the controls. A capture
+  // too tall to fit gets cropped rather than pillarboxed, so no bars appear down the sides.
   private func viewfinderSize(in container: CGSize) -> CGSize {
     let aspect = cameraManager.viewfinderAspectRatio
     guard container.width > 0, container.height > 0, aspect > 0 else { return .zero }
 
-    if isLandscape(container) {
-      let width = min(container.height * aspect, max(container.width - minControlThickness, 0))
-      return CGSize(width: width, height: width / aspect)
-    }
-
-    // Portrait fills the width, cropping a capture too tall to fit rather than pillarboxing it.
-    let height = min(container.width / aspect, max(container.height - minControlThickness, 0))
+    let height = min(container.width / aspect, max(container.height - controlStripThickness, 0))
     return CGSize(width: container.width, height: height)
-  }
-
-  private func controlThickness(in container: CGSize, frame: CGSize) -> CGFloat {
-    let leftover =
-      isLandscape(container) ? container.width - frame.width : container.height - frame.height
-    return max(leftover, minControlThickness)
   }
 
   private func viewfinder(_ frame: CGSize) -> some View {

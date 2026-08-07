@@ -21,6 +21,7 @@ class CameraManager: ObservableObject {
   private var isConfiguring = false
   private var isForegrounded = true
   private var photoAspectRatio: CGFloat = 4.0 / 3.0
+  private var captureOrientation: UIImage.Orientation = .up
   private var captureDelegates: [Int64: PhotoCaptureDelegate] = [:]
   private var pendingCaptures: [Int64: CheckedContinuation<UIImage?, Never>] = [:]
   private var rotationCoordinators: [AVCaptureDevice.RotationCoordinator] = []
@@ -58,9 +59,11 @@ class CameraManager: ObservableObject {
       backPreviewLayer = backPreview
       frontPreviewLayer = frontPreview
       photoAspectRatio = setup.photoAspectRatio
+      // The UI is locked to portrait, so the frame's shape is settled here rather than tracking
+      // the device.
+      viewfinderAspectRatio = 1 / setup.photoAspectRatio
 
-      trackRotation(of: setup.backDevice, isFront: false, previewLayer: backPreview)
-      trackRotation(of: setup.frontDevice, isFront: true, previewLayer: frontPreview)
+      trackRotation(of: setup.backDevice, previewLayer: backPreview)
 
       isSessionConfigured = true
       if isForegrounded {
@@ -242,6 +245,11 @@ class CameraManager: ObservableObject {
     guard session.canAddConnection(previewConnection) else { throw failure }
     session.addConnection(previewConnection)
 
+    for connection in [outputConnection, previewConnection]
+    where connection.isVideoRotationAngleSupported(portraitRotationAngle) {
+      connection.videoRotationAngle = portraitRotationAngle
+    }
+
     if device.position == .front {
       for connection in [outputConnection, previewConnection]
       where connection.isVideoMirroringSupported {
@@ -251,33 +259,21 @@ class CameraManager: ObservableObject {
     }
   }
 
+  // AVFoundation calls portrait 90 degrees for these landscape-native sensors. The UI no longer
+  // rotates, so both connections stay pinned here and the photo always matches the frame; the
+  // device's real attitude only decides which way is up in the saved file.
+  private nonisolated static let portraitRotationAngle: CGFloat = 90
+
   // MARK: - Rotation
-  private func trackRotation(
-    of device: AVCaptureDevice, isFront: Bool, previewLayer: AVCaptureVideoPreviewLayer
-  ) {
+  // Connections are pinned to portrait, so this only decides which way is up in the saved file.
+  private func trackRotation(of device: AVCaptureDevice, previewLayer: AVCaptureVideoPreviewLayer) {
     let coordinator = AVCaptureDevice.RotationCoordinator(
       device: device, previewLayer: previewLayer)
     rotationCoordinators.append(coordinator)
 
-    observeRotationAngle(\.videoRotationAngleForHorizonLevelPreview, of: coordinator) {
-      [weak self] angle in
-      let layer = isFront ? self?.frontPreviewLayer : self?.backPreviewLayer
-      Self.apply(angle, to: layer?.connection)
-    }
-
     observeRotationAngle(\.videoRotationAngleForHorizonLevelCapture, of: coordinator) {
       [weak self] angle in
-      guard let self else { return }
-      let output = isFront ? self.frontCameraOutput : self.backCameraOutput
-      Self.apply(angle, to: output?.connection(with: .video))
-
-      // The mask promises what will be saved, so it tracks the capture angle, not the livelier
-      // preview angle — they disagree mid-rotation.
-      if !isFront {
-        let isPortrait = angle.truncatingRemainder(dividingBy: 180) != 0
-        let aspect = self.photoAspectRatio
-        self.viewfinderAspectRatio = isPortrait ? 1 / aspect : aspect
-      }
+      self?.captureOrientation = Self.orientation(forHorizonLevelAngle: angle)
     }
   }
 
@@ -295,9 +291,18 @@ class CameraManager: ObservableObject {
       })
   }
 
-  private static func apply(_ angle: CGFloat, to connection: AVCaptureConnection?) {
-    guard let connection, connection.isVideoRotationAngleSupported(angle) else { return }
-    connection.videoRotationAngle = angle
+  // How far the phone is held from upright, as an orientation tag the photo library can apply
+  // without touching a pixel.
+  private static func orientation(forHorizonLevelAngle angle: CGFloat) -> UIImage.Orientation {
+    let degrees = Int((angle - portraitRotationAngle).rounded())
+    let turns = ((degrees / 90) % 4 + 4) % 4
+
+    switch turns {
+    case 1: return .left
+    case 2: return .down
+    case 3: return .right
+    default: return .up
+    }
   }
 
   // MARK: - Session Lifecycle
@@ -398,7 +403,7 @@ class CameraManager: ObservableObject {
     format.scale = back.scale
     format.opaque = true
 
-    return UIGraphicsImageRenderer(size: canvas, format: format).image { context in
+    let composited = UIGraphicsImageRenderer(size: canvas, format: format).image { context in
       back.draw(in: CGRect(origin: CGPoint(x: -crop.x, y: -crop.y), size: back.size))
 
       let pipRect = framing.pipRect.applying(
@@ -419,6 +424,11 @@ class CameraManager: ObservableObject {
       UIColor.white.setStroke()
       border.stroke()
     }
+
+    // Tagging the orientation rotates the photo for anything that opens it without re-encoding a
+    // single pixel, so the framing stays exactly as it was composed.
+    guard captureOrientation != .up, let pixels = composited.cgImage else { return composited }
+    return UIImage(cgImage: pixels, scale: composited.scale, orientation: captureOrientation)
   }
 
   // MARK: - Saving
