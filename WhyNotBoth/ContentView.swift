@@ -27,7 +27,7 @@ struct ContentView: View {
             pictureInPicture(frontPreviewLayer, in: geometry.size)
           }
 
-          captureControls
+          captureControls(framing: viewfinderFraming(in: geometry))
         } else {
           statusView
         }
@@ -76,14 +76,14 @@ struct ContentView: View {
     let pipSize = PiPLayout.size(inContainerOfWidth: container.width)
     let anchor = PiPLayout.center(for: pipCorner, in: container)
     let shape = RoundedRectangle(
-      cornerRadius: PiPLayout.cornerRadius(inContainerOfWidth: container.width), style: .continuous)
+      cornerRadius: PiPLayout.cornerRadius(forPiPWidth: pipSize.width), style: .continuous)
 
     return CameraPreviewView(previewLayer: previewLayer)
       .frame(width: pipSize.width, height: pipSize.height)
       .clipShape(shape)
       .overlay(
         shape.strokeBorder(
-          Color.white, lineWidth: PiPLayout.borderWidth(inContainerOfWidth: container.width))
+          Color.white, lineWidth: PiPLayout.borderWidth(forPiPWidth: pipSize.width))
       )
       .shadow(color: .black.opacity(0.3), radius: 8, y: 2)
       .scaleEffect(isDraggingPiP ? 1.1 : 1)
@@ -117,11 +117,28 @@ struct ContentView: View {
       }
   }
 
-  private var captureControls: some View {
+  // The back preview ignores the safe area but the PiP doesn't, so shift it into full-screen space.
+  private func viewfinderFraming(in geometry: GeometryProxy) -> ViewfinderFraming {
+    let insets = geometry.safeAreaInsets
+    let full = CGSize(
+      width: geometry.size.width + insets.leading + insets.trailing,
+      height: geometry.size.height + insets.top + insets.bottom
+    )
+
+    var pipRect = PiPLayout.rect(for: pipCorner, in: geometry.size)
+    pipRect.origin.x += insets.leading
+    pipRect.origin.y += insets.top
+
+    return ViewfinderFraming(size: full, pipRect: pipRect)
+  }
+
+  private func captureControls(framing: ViewfinderFraming) -> some View {
     VStack {
       Spacer()
 
-      Button(action: capturePhoto) {
+      Button {
+        cameraManager.capturePhoto(framing: framing)
+      } label: {
         ZStack {
           Circle()
             .stroke(Color.white, lineWidth: 4)
@@ -179,9 +196,6 @@ struct ContentView: View {
     }
   }
 
-  private func capturePhoto() {
-    cameraManager.capturePhoto(pipCorner: pipCorner)
-  }
 }
 
 #Preview {

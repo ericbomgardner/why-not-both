@@ -19,7 +19,9 @@ class CameraManager: ObservableObject {
   private var backCameraOutput: AVCapturePhotoOutput?
   private var frontCameraOutput: AVCapturePhotoOutput?
   private var isConfiguring = false
+  private var isForegrounded = true
   private var captureDelegates: [Int64: PhotoCaptureDelegate] = [:]
+  private var pendingCaptures: [Int64: CheckedContinuation<UIImage?, Never>] = [:]
   private var rotationCoordinators: [AVCaptureDevice.RotationCoordinator] = []
   private var rotationObservations: [NSKeyValueObservation] = []
 
@@ -59,7 +61,9 @@ class CameraManager: ObservableObject {
       trackRotation(of: setup.frontDevice, isFront: true, previewLayer: frontPreview)
 
       isSessionConfigured = true
-      startSession()
+      if isForegrounded {
+        startSession()
+      }
     } catch let cameraError as CameraError {
       error = cameraError
     } catch {
@@ -210,6 +214,7 @@ class CameraManager: ObservableObject {
 
   // MARK: - Session Lifecycle
   func startSession() {
+    isForegrounded = true
     guard let session = multiCamSession else { return }
     sessionQueue.async {
       guard !session.isRunning else { return }
@@ -218,6 +223,9 @@ class CameraManager: ObservableObject {
   }
 
   func stopSession() {
+    isForegrounded = false
+    // Stopping the session can strand a capture's delegate callbacks, so resolve them first.
+    cancelPendingCaptures()
     guard let session = multiCamSession else { return }
     sessionQueue.async {
       guard session.isRunning else { return }
@@ -226,7 +234,7 @@ class CameraManager: ObservableObject {
   }
 
   // MARK: - Capture
-  func capturePhoto(pipCorner: PiPCorner) {
+  func capturePhoto(framing: ViewfinderFraming) {
     guard !isCapturing,
       let backOutput = backCameraOutput,
       let frontOutput = frontCameraOutput
@@ -246,7 +254,7 @@ class CameraManager: ObservableObject {
         return
       }
 
-      capturedImage = composite(back: backImage, front: frontImage, corner: pipCorner)
+      capturedImage = composite(back: backImage, front: frontImage, framing: framing)
     }
   }
 
@@ -257,8 +265,9 @@ class CameraManager: ObservableObject {
     let id = settings.uniqueID
 
     let image = await withCheckedContinuation { continuation in
-      let delegate = PhotoCaptureDelegate { image in
-        continuation.resume(returning: image)
+      pendingCaptures[id] = continuation
+      let delegate = PhotoCaptureDelegate { [weak self] image in
+        Task { @MainActor in self?.finishCapture(id: id, image: image) }
       }
       captureDelegates[id] = delegate
       output.capturePhoto(with: settings, delegate: delegate)
@@ -268,18 +277,43 @@ class CameraManager: ObservableObject {
     return image
   }
 
-  private func composite(back: UIImage, front: UIImage, corner: PiPCorner) -> UIImage {
-    let canvas = back.size
+  // Resuming only via this lookup is what keeps a continuation from being resumed twice.
+  private func finishCapture(id: Int64, image: UIImage?) {
+    pendingCaptures.removeValue(forKey: id)?.resume(returning: image)
+  }
+
+  private func cancelPendingCaptures() {
+    for id in pendingCaptures.keys {
+      finishCapture(id: id, image: nil)
+    }
+  }
+
+  private func composite(back: UIImage, front: UIImage, framing: ViewfinderFraming) -> UIImage {
+    // The preview aspect-fills, so crop away the bands the viewfinder never showed.
+    let previewScale = max(
+      framing.size.width / back.size.width,
+      framing.size.height / back.size.height
+    )
+    let canvas = CGSize(
+      width: min(framing.size.width / previewScale, back.size.width),
+      height: min(framing.size.height / previewScale, back.size.height)
+    )
+    let crop = CGPoint(
+      x: (back.size.width - canvas.width) / 2,
+      y: (back.size.height - canvas.height) / 2
+    )
+
     let format = UIGraphicsImageRendererFormat.preferred()
     format.scale = back.scale
     format.opaque = true
 
     return UIGraphicsImageRenderer(size: canvas, format: format).image { context in
-      back.draw(in: CGRect(origin: .zero, size: canvas))
+      back.draw(in: CGRect(origin: CGPoint(x: -crop.x, y: -crop.y), size: back.size))
 
-      let pipRect = PiPLayout.rect(for: corner, in: canvas)
-      let radius = PiPLayout.cornerRadius(inContainerOfWidth: canvas.width)
-      let lineWidth = PiPLayout.borderWidth(inContainerOfWidth: canvas.width)
+      let pipRect = framing.pipRect.applying(
+        CGAffineTransform(scaleX: 1 / previewScale, y: 1 / previewScale))
+      let radius = PiPLayout.cornerRadius(forPiPWidth: pipRect.width)
+      let lineWidth = PiPLayout.borderWidth(forPiPWidth: pipRect.width)
 
       context.cgContext.saveGState()
       UIBezierPath(roundedRect: pipRect, cornerRadius: radius).addClip()
@@ -386,7 +420,7 @@ private final class PhotoCaptureDelegate: NSObject, AVCapturePhotoCaptureDelegat
     image = UIImage(data: data)
   }
 
-  // Always called last, even when capture fails outright, so the continuation resumes exactly once.
+  // Always called last, even when capture fails outright.
   func photoOutput(
     _ output: AVCapturePhotoOutput,
     didFinishCaptureFor resolvedSettings: AVCaptureResolvedPhotoSettings, error: Error?

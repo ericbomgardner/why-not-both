@@ -7,23 +7,30 @@ enum PiPCorner: CaseIterable {
   case bottomTrailing
 }
 
+// What the back preview was showing when the shutter fired, and where the PiP sat inside it.
+struct ViewfinderFraming {
+  let size: CGSize
+  let pipRect: CGRect
+}
+
 enum PiPLayout {
   static let widthFraction: CGFloat = 0.28
   static let aspectRatio: CGFloat = 3.0 / 4.0
   static let marginFraction: CGFloat = 0.04
-  static let cornerRadiusFraction: CGFloat = 0.05
-  static let borderWidthFraction: CGFloat = 0.008
+  static let cornerRadiusFraction: CGFloat = 0.18
+  static let borderWidthFraction: CGFloat = 0.03
 
   static func size(inContainerOfWidth width: CGFloat) -> CGSize {
     let pipWidth = width * widthFraction
     return CGSize(width: pipWidth, height: pipWidth / aspectRatio)
   }
 
-  static func cornerRadius(inContainerOfWidth width: CGFloat) -> CGFloat {
+  // Both are relative to the PiP itself, so the screen and the saved photo agree at any scale.
+  static func cornerRadius(forPiPWidth width: CGFloat) -> CGFloat {
     width * cornerRadiusFraction
   }
 
-  static func borderWidth(inContainerOfWidth width: CGFloat) -> CGFloat {
+  static func borderWidth(forPiPWidth width: CGFloat) -> CGFloat {
     width * borderWidthFraction
   }
 
@@ -52,13 +59,9 @@ enum PiPLayout {
 
   static func rect(for corner: PiPCorner, in container: CGSize) -> CGRect {
     let pip = size(inContainerOfWidth: container.width)
-    let origin = center(for: corner, in: container)
-    return CGRect(
-      x: origin.x - pip.width / 2,
-      y: origin.y - pip.height / 2,
-      width: pip.width,
-      height: pip.height
-    )
+    let middle = center(for: corner, in: container)
+    let origin = CGPoint(x: middle.x - pip.width / 2, y: middle.y - pip.height / 2)
+    return CGRect(origin: origin, size: pip)
   }
 
   static func nearestCorner(to point: CGPoint, in container: CGSize) -> PiPCorner {
