@@ -8,7 +8,7 @@ class CameraManager: ObservableObject {
   // MARK: - Published Properties
   @Published private(set) var backPreviewLayer: AVCaptureVideoPreviewLayer?
   @Published private(set) var frontPreviewLayer: AVCaptureVideoPreviewLayer?
-  @Published var capturedImage: UIImage?
+  @Published private(set) var viewfinderAspectRatio: CGFloat = 3.0 / 4.0
   @Published private(set) var isCapturing = false
   @Published var error: CameraError?
   @Published private(set) var isSessionConfigured = false
@@ -20,6 +20,7 @@ class CameraManager: ObservableObject {
   private var frontCameraOutput: AVCapturePhotoOutput?
   private var isConfiguring = false
   private var isForegrounded = true
+  private var sensorAspectRatio: CGFloat = 4.0 / 3.0
   private var captureDelegates: [Int64: PhotoCaptureDelegate] = [:]
   private var pendingCaptures: [Int64: CheckedContinuation<UIImage?, Never>] = [:]
   private var rotationCoordinators: [AVCaptureDevice.RotationCoordinator] = []
@@ -56,6 +57,7 @@ class CameraManager: ObservableObject {
       frontCameraOutput = setup.frontOutput
       backPreviewLayer = backPreview
       frontPreviewLayer = frontPreview
+      sensorAspectRatio = setup.sensorAspectRatio
 
       trackRotation(of: setup.backDevice, isFront: false, previewLayer: backPreview)
       trackRotation(of: setup.frontDevice, isFront: true, previewLayer: frontPreview)
@@ -124,12 +126,16 @@ class CameraManager: ObservableObject {
       device: frontDevice, output: frontOutput, preview: frontPreview, to: session,
       failure: .frontCameraUnavailable)
 
+    let dimensions = CMVideoFormatDescriptionGetDimensions(
+      backDevice.activeFormat.formatDescription)
+
     return SessionSetup(
       session: session,
       backDevice: backDevice,
       frontDevice: frontDevice,
       backOutput: backOutput,
-      frontOutput: frontOutput
+      frontOutput: frontOutput,
+      sensorAspectRatio: CGFloat(dimensions.width) / CGFloat(dimensions.height)
     )
   }
 
@@ -182,8 +188,14 @@ class CameraManager: ObservableObject {
 
     observeRotationAngle(\.videoRotationAngleForHorizonLevelPreview, of: coordinator) {
       [weak self] angle in
-      let layer = isFront ? self?.frontPreviewLayer : self?.backPreviewLayer
+      guard let self else { return }
+      let layer = isFront ? self.frontPreviewLayer : self.backPreviewLayer
       Self.apply(angle, to: layer?.connection)
+
+      if !isFront {
+        let isPortrait = angle.truncatingRemainder(dividingBy: 180) != 0
+        self.viewfinderAspectRatio = isPortrait ? 1 / self.sensorAspectRatio : self.sensorAspectRatio
+      }
     }
 
     observeRotationAngle(\.videoRotationAngleForHorizonLevelCapture, of: coordinator) {
@@ -254,7 +266,7 @@ class CameraManager: ObservableObject {
         return
       }
 
-      capturedImage = composite(back: backImage, front: frontImage, framing: framing)
+      await save(composite(back: backImage, front: frontImage, framing: framing))
     }
   }
 
@@ -295,8 +307,8 @@ class CameraManager: ObservableObject {
       framing.size.height / back.size.height
     )
     let canvas = CGSize(
-      width: min(framing.size.width / previewScale, back.size.width),
-      height: min(framing.size.height / previewScale, back.size.height)
+      width: min((framing.size.width / previewScale).rounded(), back.size.width),
+      height: min((framing.size.height / previewScale).rounded(), back.size.height)
     )
     let crop = CGPoint(
       x: (back.size.width - canvas.width) / 2,
@@ -331,9 +343,7 @@ class CameraManager: ObservableObject {
   }
 
   // MARK: - Saving
-  func saveImageToLibrary() async -> Bool {
-    guard let image = capturedImage else { return false }
-
+  private func save(_ image: UIImage) async {
     var status = PHPhotoLibrary.authorizationStatus(for: .addOnly)
     if status == .notDetermined {
       status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
@@ -341,17 +351,15 @@ class CameraManager: ObservableObject {
 
     guard status == .authorized || status == .limited else {
       error = .photoLibraryPermissionDenied
-      return false
+      return
     }
 
     do {
       try await PHPhotoLibrary.shared().performChanges {
         PHAssetCreationRequest.creationRequestForAsset(from: image)
       }
-      return true
     } catch {
       self.error = .failedToSavePhoto
-      return false
     }
   }
 }
@@ -369,6 +377,7 @@ private struct SessionSetup {
   let frontDevice: AVCaptureDevice
   let backOutput: AVCapturePhotoOutput
   let frontOutput: AVCapturePhotoOutput
+  let sensorAspectRatio: CGFloat
 }
 
 // MARK: - Error Types

@@ -7,10 +7,12 @@ struct ContentView: View {
   @State private var pipCorner: PiPCorner = .topTrailing
   @State private var dragTranslation: CGSize = .zero
   @State private var isDraggingPiP = false
-  @State private var showingPreview = false
+  @State private var flashOpacity: Double = 0
   @State private var showingError = false
 
   private let snapAnimation = Animation.spring(response: 0.3, dampingFraction: 0.8)
+  private let flashHold = Duration.milliseconds(60)
+  private let flashFade = 0.25
 
   var body: some View {
     GeometryReader { geometry in
@@ -18,19 +20,28 @@ struct ContentView: View {
         Color.black.ignoresSafeArea()
 
         if cameraManager.isSessionConfigured {
+          let frame = viewfinderSize(in: geometry.size)
+
           if let backPreviewLayer = cameraManager.backPreviewLayer {
             CameraPreviewView(previewLayer: backPreviewLayer)
-              .ignoresSafeArea()
+              .frame(width: frame.width, height: frame.height)
+              .clipped()
           }
 
           if let frontPreviewLayer = cameraManager.frontPreviewLayer {
-            pictureInPicture(frontPreviewLayer, in: geometry.size)
+            pictureInPicture(frontPreviewLayer, in: frame)
+              .frame(width: frame.width, height: frame.height)
           }
 
-          captureControls(framing: viewfinderFraming(in: geometry))
+          captureControls(framing: framing(in: frame))
         } else {
           statusView
         }
+
+        Color.white
+          .ignoresSafeArea()
+          .opacity(flashOpacity)
+          .allowsHitTesting(false)
       }
     }
     .onAppear {
@@ -46,9 +57,6 @@ struct ContentView: View {
         break
       }
     }
-    .sheet(isPresented: $showingPreview) {
-      PhotoPreviewView(cameraManager: cameraManager, isPresented: $showingPreview)
-    }
     .alert("Camera Error", isPresented: $showingError) {
       Button("OK") {}
       Button("Settings") {
@@ -59,22 +67,32 @@ struct ContentView: View {
     } message: {
       Text(cameraManager.error?.localizedDescription ?? "An unknown error occurred.")
     }
-    .onChange(of: cameraManager.capturedImage) { _, newImage in
-      if newImage != nil {
-        showingPreview = true
-      }
-    }
     .onChange(of: cameraManager.error) { _, error in
       showingError = error != nil
     }
     .statusBarHidden()
   }
 
+  // The frame is exactly what gets saved, so the bands around it are the mask.
+  private func viewfinderSize(in container: CGSize) -> CGSize {
+    let aspect = cameraManager.viewfinderAspectRatio
+    let heightAtFullWidth = container.width / aspect
+
+    if heightAtFullWidth <= container.height {
+      return CGSize(width: container.width, height: heightAtFullWidth)
+    }
+    return CGSize(width: container.height * aspect, height: container.height)
+  }
+
+  private func framing(in frame: CGSize) -> ViewfinderFraming {
+    ViewfinderFraming(size: frame, pipRect: PiPLayout.rect(for: pipCorner, in: frame))
+  }
+
   private func pictureInPicture(
-    _ previewLayer: AVCaptureVideoPreviewLayer, in container: CGSize
+    _ previewLayer: AVCaptureVideoPreviewLayer, in frame: CGSize
   ) -> some View {
-    let pipSize = PiPLayout.size(inContainerOfWidth: container.width)
-    let anchor = PiPLayout.center(for: pipCorner, in: container)
+    let pipSize = PiPLayout.size(inContainerOfWidth: frame.width)
+    let anchor = PiPLayout.center(for: pipCorner, in: frame)
     let shape = RoundedRectangle(
       cornerRadius: PiPLayout.cornerRadius(forPiPWidth: pipSize.width), style: .continuous)
 
@@ -92,44 +110,39 @@ struct ContentView: View {
         x: anchor.x + dragTranslation.width,
         y: anchor.y + dragTranslation.height
       )
-      .gesture(dragGesture(in: container))
+      .gesture(dragGesture(in: frame))
   }
 
-  private func dragGesture(in container: CGSize) -> some Gesture {
+  private func dragGesture(in frame: CGSize) -> some Gesture {
     // Global space: the view moves and scales mid-drag, which distorts translation in local space.
     DragGesture(coordinateSpace: .global)
       .onChanged { value in
         isDraggingPiP = true
-        dragTranslation = value.translation
+        dragTranslation = clamped(value.translation, in: frame)
       }
       .onEnded { value in
-        let anchor = PiPLayout.center(for: pipCorner, in: container)
+        let anchor = PiPLayout.center(for: pipCorner, in: frame)
+        let translation = clamped(value.translation, in: frame)
         let dropped = CGPoint(
-          x: anchor.x + value.translation.width,
-          y: anchor.y + value.translation.height
+          x: anchor.x + translation.width,
+          y: anchor.y + translation.height
         )
 
         isDraggingPiP = false
         withAnimation(snapAnimation) {
-          pipCorner = PiPLayout.nearestCorner(to: dropped, in: container)
+          pipCorner = PiPLayout.nearestCorner(to: dropped, in: frame)
           dragTranslation = .zero
         }
       }
   }
 
-  // The back preview ignores the safe area but the PiP doesn't, so shift it into full-screen space.
-  private func viewfinderFraming(in geometry: GeometryProxy) -> ViewfinderFraming {
-    let insets = geometry.safeAreaInsets
-    let full = CGSize(
-      width: geometry.size.width + insets.leading + insets.trailing,
-      height: geometry.size.height + insets.top + insets.bottom
-    )
-
-    var pipRect = PiPLayout.rect(for: pipCorner, in: geometry.size)
-    pipRect.origin.x += insets.leading
-    pipRect.origin.y += insets.top
-
-    return ViewfinderFraming(size: full, pipRect: pipRect)
+  // Keeping the PiP inside the frame keeps it inside the saved photo.
+  private func clamped(_ translation: CGSize, in frame: CGSize) -> CGSize {
+    let anchor = PiPLayout.center(for: pipCorner, in: frame)
+    let pip = PiPLayout.size(inContainerOfWidth: frame.width)
+    let x = min(max(anchor.x + translation.width, pip.width / 2), frame.width - pip.width / 2)
+    let y = min(max(anchor.y + translation.height, pip.height / 2), frame.height - pip.height / 2)
+    return CGSize(width: x - anchor.x, height: y - anchor.y)
   }
 
   private func captureControls(framing: ViewfinderFraming) -> some View {
@@ -137,7 +150,7 @@ struct ContentView: View {
       Spacer()
 
       Button {
-        cameraManager.capturePhoto(framing: framing)
+        capturePhoto(framing: framing)
       } label: {
         ZStack {
           Circle()
@@ -196,6 +209,17 @@ struct ContentView: View {
     }
   }
 
+  private func capturePhoto(framing: ViewfinderFraming) {
+    cameraManager.capturePhoto(framing: framing)
+
+    flashOpacity = 1
+    Task {
+      try? await Task.sleep(for: flashHold)
+      withAnimation(.easeOut(duration: flashFade)) {
+        flashOpacity = 0
+      }
+    }
+  }
 }
 
 #Preview {
