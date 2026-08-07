@@ -250,11 +250,17 @@ class CameraManager: ObservableObject {
       connection.videoRotationAngle = portraitRotationAngle
     }
 
+    // The selfie reads like a mirror, so the preview is mirrored. The still is deliberately left
+    // alone and flipped when compositing instead — asking the photo connection to mirror silently
+    // does nothing, which is how the two came to disagree.
     if device.position == .front {
-      for connection in [outputConnection, previewConnection]
-      where connection.isVideoMirroringSupported {
-        connection.automaticallyAdjustsVideoMirroring = false
-        connection.isVideoMirrored = true
+      if previewConnection.isVideoMirroringSupported {
+        previewConnection.automaticallyAdjustsVideoMirroring = false
+        previewConnection.isVideoMirrored = true
+      }
+      if outputConnection.isVideoMirroringSupported {
+        outputConnection.automaticallyAdjustsVideoMirroring = false
+        outputConnection.isVideoMirrored = false
       }
     }
   }
@@ -294,8 +300,8 @@ class CameraManager: ObservableObject {
   // How far the phone is held from upright, as an orientation tag the photo library can apply
   // without touching a pixel.
   private static func orientation(forHorizonLevelAngle angle: CGFloat) -> UIImage.Orientation {
-    let degrees = Int((angle - portraitRotationAngle).rounded())
-    let turns = ((degrees / 90) % 4 + 4) % 4
+    let quarters = Int(((angle - portraitRotationAngle) / 90).rounded())
+    let turns = ((quarters % 4) + 4) % 4
 
     // The tag says how to get back to upright, so it runs opposite to the way the phone turned.
     switch turns {
@@ -335,6 +341,9 @@ class CameraManager: ObservableObject {
     else { return false }
 
     isCapturing = true
+    // Settled at the shutter, not after: the phone can turn while the capture is in flight, and
+    // this tag is the only thing deciding which way is up.
+    let orientation = captureOrientation
 
     Task {
       async let back = capture(from: backOutput)
@@ -348,7 +357,8 @@ class CameraManager: ObservableObject {
         return
       }
 
-      await save(composite(back: backImage, front: frontImage, framing: framing))
+      await save(
+        composite(back: backImage, front: frontImage, framing: framing, orientation: orientation))
     }
 
     return true
@@ -385,7 +395,9 @@ class CameraManager: ObservableObject {
     }
   }
 
-  private func composite(back: UIImage, front: UIImage, framing: ViewfinderFraming) -> UIImage {
+  private func composite(
+    back: UIImage, front: UIImage, framing: ViewfinderFraming, orientation: UIImage.Orientation
+  ) -> UIImage {
     // The preview aspect-fills, so crop away the bands the viewfinder never showed.
     let previewScale = max(
       framing.size.width / back.size.width,
@@ -414,6 +426,10 @@ class CameraManager: ObservableObject {
 
       context.cgContext.saveGState()
       UIBezierPath(roundedRect: pipRect, cornerRadius: radius).addClip()
+      // Flipping about the PiP's own centre leaves the clip covering the same pixels.
+      context.cgContext.translateBy(x: pipRect.midX, y: 0)
+      context.cgContext.scaleBy(x: -1, y: 1)
+      context.cgContext.translateBy(x: -pipRect.midX, y: 0)
       front.drawAspectFill(in: pipRect)
       context.cgContext.restoreGState()
 
@@ -428,8 +444,8 @@ class CameraManager: ObservableObject {
 
     // Tagging the orientation rotates the photo for anything that opens it without re-encoding a
     // single pixel, so the framing stays exactly as it was composed.
-    guard captureOrientation != .up, let pixels = composited.cgImage else { return composited }
-    return UIImage(cgImage: pixels, scale: composited.scale, orientation: captureOrientation)
+    guard orientation != .up, let pixels = composited.cgImage else { return composited }
+    return UIImage(cgImage: pixels, scale: composited.scale, orientation: orientation)
   }
 
   // MARK: - Saving
