@@ -297,10 +297,11 @@ class CameraManager: ObservableObject {
     let degrees = Int((angle - portraitRotationAngle).rounded())
     let turns = ((degrees / 90) % 4 + 4) % 4
 
+    // The tag says how to get back to upright, so it runs opposite to the way the phone turned.
     switch turns {
-    case 1: return .left
+    case 1: return .right
     case 2: return .down
-    case 3: return .right
+    case 3: return .left
     default: return .up
     }
   }
