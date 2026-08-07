@@ -9,22 +9,26 @@ import Foundation
 // Mirrors ContentView. Kept in step by hand — these are the numbers the view lays out from.
 let shutterDiameter: CGFloat = 80
 let shutterMargin: CGFloat = 24
-let controlStripThickness = shutterDiameter + shutterMargin * 2
+let minControlThickness = shutterDiameter + shutterMargin * 2
 
 func isLandscape(_ container: CGSize) -> Bool { container.width > container.height }
 
-func availableSize(in container: CGSize) -> CGSize {
+func viewfinderSize(in container: CGSize, aspect: CGFloat) -> CGSize {
+  guard container.width > 0, container.height > 0, aspect > 0 else { return .zero }
+
   if isLandscape(container) {
-    return CGSize(width: max(container.width - controlStripThickness, 0), height: container.height)
+    let width = min(container.height * aspect, max(container.width - minControlThickness, 0))
+    return CGSize(width: width, height: width / aspect)
   }
-  return CGSize(width: container.width, height: max(container.height - controlStripThickness, 0))
+
+  let height = min(container.width / aspect, max(container.height - minControlThickness, 0))
+  return CGSize(width: container.width, height: height)
 }
 
-func viewfinderSize(in container: CGSize, aspect: CGFloat) -> CGSize {
-  let available = availableSize(in: container)
-  guard available.width > 0, available.height > 0 else { return .zero }
-  let clamped = max(aspect, available.width / available.height)
-  return CGSize(width: available.width, height: available.width / clamped)
+func controlThickness(in container: CGSize, frame: CGSize) -> CGFloat {
+  let leftover =
+    isLandscape(container) ? container.width - frame.width : container.height - frame.height
+  return max(leftover, minControlThickness)
 }
 
 // Mirrors CameraManager.composite.
@@ -41,7 +45,7 @@ func canvasAndPiP(viewfinder: CGSize, photo: CGSize, pipRect: CGRect) -> (CGSize
 // Mirrors ContentView.clamped.
 func clamped(_ translation: CGSize, from corner: PiPCorner, in frame: CGSize) -> CGSize {
   let anchor = PiPLayout.center(for: corner, in: frame)
-  let pip = PiPLayout.size(inContainerOfWidth: frame.width)
+  let pip = PiPLayout.size(in: frame)
   let x = min(max(anchor.x + translation.width, pip.width / 2), frame.width - pip.width / 2)
   let y = min(max(anchor.y + translation.height, pip.height / 2), frame.height - pip.height / 2)
   return CGSize(width: x - anchor.x, height: y - anchor.y)
@@ -85,6 +89,8 @@ enum CheckViewfinderGeometry {
       run(name: name, safeArea: safeArea, aspect: aspect, photo: photo)
     }
 
+    sameSceneEitherWayUp()
+
     // Dropping the PiP nearest a corner selects that corner.
     for corner in PiPCorner.allCases {
       let frame = viewfinderSize(in: portraitSafeArea, aspect: 0.75)
@@ -99,20 +105,74 @@ enum CheckViewfinderGeometry {
     exit(failures.isEmpty ? 0 : 1)
   }
 
+  // Turning the phone must not change what the camera captures, only which way round it is.
+  static func sameSceneEitherWayUp() {
+    let portraitPhoto = CGSize(width: 3024, height: 4032)
+    let landscapePhoto = CGSize(width: 4032, height: 3024)
+
+    let portraitFrame = viewfinderSize(
+      in: portraitSafeArea, aspect: portraitPhoto.width / portraitPhoto.height)
+    let landscapeFrame = viewfinderSize(
+      in: landscapeSafeArea, aspect: landscapePhoto.width / landscapePhoto.height)
+
+    let (portraitCanvas, _) = canvasAndPiP(
+      viewfinder: portraitFrame, photo: portraitPhoto,
+      pipRect: PiPLayout.rect(for: .topTrailing, in: portraitFrame))
+    let (landscapeCanvas, _) = canvasAndPiP(
+      viewfinder: landscapeFrame, photo: landscapePhoto,
+      pipRect: PiPLayout.rect(for: .topTrailing, in: landscapeFrame))
+
+    check(
+      "portrait saves the whole sensor frame",
+      portraitCanvas == portraitPhoto,
+      "canvas \(portraitCanvas) vs photo \(portraitPhoto)")
+
+    check(
+      "landscape saves the whole sensor frame",
+      landscapeCanvas == landscapePhoto,
+      "canvas \(landscapeCanvas) vs photo \(landscapePhoto)")
+
+    check(
+      "both orientations capture the same area",
+      portraitCanvas.width * portraitCanvas.height
+        == landscapeCanvas.width * landscapeCanvas.height,
+      "portrait \(portraitCanvas) vs landscape \(landscapeCanvas)")
+
+    // The PiP shouldn't balloon just because the frame turned on its side.
+    let portraitPiP = PiPLayout.size(in: portraitFrame)
+    let landscapePiP = PiPLayout.size(in: landscapeFrame)
+    let portraitShare =
+      (portraitPiP.width * portraitPiP.height) / (portraitFrame.width * portraitFrame.height)
+    let landscapeShare =
+      (landscapePiP.width * landscapePiP.height) / (landscapeFrame.width * landscapeFrame.height)
+
+    check(
+      "pip covers a similar share of the frame either way up",
+      approx(portraitShare, landscapeShare, 0.02),
+      "portrait \(round(portraitShare * 1000) / 10)% vs landscape \(round(landscapeShare * 1000) / 10)%")
+
+    check(
+      "pip turns with the frame",
+      portraitPiP.width < portraitPiP.height && landscapePiP.width > landscapePiP.height,
+      "portrait \(portraitPiP) landscape \(landscapePiP)")
+  }
+
   static func run(name: String, safeArea: CGSize, aspect: CGFloat, photo: CGSize) {
     let frame = viewfinderSize(in: safeArea, aspect: aspect)
-    let available = availableSize(in: safeArea)
+    let controls = controlThickness(in: safeArea, frame: frame)
 
-  // No bars down the sides, whatever the capture shape.
+  // Frame plus controls account for the container, so the leftover is control area, not a bar.
+  let consumed = isLandscape(safeArea) ? frame.width + controls : frame.height + controls
+  let extent = isLandscape(safeArea) ? safeArea.width : safeArea.height
   check(
-    "\(name) frame fills the available width",
-    approx(frame.width, available.width),
-    "frame width \(frame.width) vs available \(available.width)")
+    "\(name) frame and controls fill the container",
+    consumed <= extent + 0.01 && controls >= minControlThickness - 0.01,
+    "frame+controls \(consumed) vs container \(extent), controls \(controls)")
 
   check(
-    "\(name) frame fits the available height",
-    frame.height <= available.height + 0.01,
-    "frame height \(frame.height) vs available \(available.height)")
+    "\(name) frame fits the container",
+    frame.width <= safeArea.width + 0.01 && frame.height <= safeArea.height + 0.01,
+    "frame \(frame) in \(safeArea)")
 
   for corner in PiPCorner.allCases {
     let pip = PiPLayout.rect(for: corner, in: frame)
@@ -154,7 +214,7 @@ enum CheckViewfinderGeometry {
     for runaway in [CGSize(width: -9999, height: -9999), CGSize(width: 9999, height: 9999)] {
       let translation = clamped(runaway, from: corner, in: frame)
       let anchor = PiPLayout.center(for: corner, in: frame)
-      let size = PiPLayout.size(inContainerOfWidth: frame.width)
+      let size = PiPLayout.size(in: frame)
       let origin = CGPoint(
         x: anchor.x + translation.width - size.width / 2,
         y: anchor.y + translation.height - size.height / 2)

@@ -16,7 +16,7 @@ struct ContentView: View {
   private let shutterDiameter: CGFloat = 80
   private let shutterMargin: CGFloat = 24
 
-  private var controlStripThickness: CGFloat { shutterDiameter + shutterMargin * 2 }
+  private var minControlThickness: CGFloat { shutterDiameter + shutterMargin * 2 }
 
   var body: some View {
     GeometryReader { geometry in
@@ -27,6 +27,7 @@ struct ContentView: View {
           let frame = viewfinderSize(in: geometry.size)
 
           let landscape = isLandscape(geometry.size)
+          let controls = controlThickness(in: geometry.size, frame: frame)
           // AnyLayout rather than branching on a stack: an if/else here would be two different
           // views, so rotating mid-drag would destroy the gesture before it could snap the PiP.
           let layout =
@@ -37,8 +38,8 @@ struct ContentView: View {
             viewfinder(frame)
             shutterButton(framing: framing(in: frame))
               .frame(
-                width: landscape ? controlStripThickness : nil,
-                height: landscape ? nil : controlStripThickness
+                width: landscape ? controls : nil,
+                height: landscape ? nil : controls
               )
           }
           .onChange(of: frame) { _, _ in
@@ -88,25 +89,26 @@ struct ContentView: View {
     container.width > container.height
   }
 
-  // The controls sit along the short edge so they never eat the width the frame needs.
-  private func availableSize(in container: CGSize) -> CGSize {
+  // The frame keeps the capture's own shape, so the same scene is saved whichever way the phone is
+  // held. Whatever space is left over becomes the control area rather than a black bar.
+  private func viewfinderSize(in container: CGSize) -> CGSize {
+    let aspect = cameraManager.viewfinderAspectRatio
+    guard container.width > 0, container.height > 0, aspect > 0 else { return .zero }
+
     if isLandscape(container) {
-      return CGSize(
-        width: max(container.width - controlStripThickness, 0), height: container.height)
+      let width = min(container.height * aspect, max(container.width - minControlThickness, 0))
+      return CGSize(width: width, height: width / aspect)
     }
-    return CGSize(
-      width: container.width, height: max(container.height - controlStripThickness, 0))
+
+    // Portrait fills the width, cropping a capture too tall to fit rather than pillarboxing it.
+    let height = min(container.width / aspect, max(container.height - minControlThickness, 0))
+    return CGSize(width: container.width, height: height)
   }
 
-  // The frame is exactly what gets saved, so the bands around it are the mask. Clamping the aspect
-  // so the frame is never taller than the space available is what keeps bars off the sides — a
-  // capture taller than that gets cropped to fit rather than pillarboxed.
-  private func viewfinderSize(in container: CGSize) -> CGSize {
-    let available = availableSize(in: container)
-    guard available.width > 0, available.height > 0 else { return .zero }
-
-    let aspect = max(cameraManager.viewfinderAspectRatio, available.width / available.height)
-    return CGSize(width: available.width, height: available.width / aspect)
+  private func controlThickness(in container: CGSize, frame: CGSize) -> CGFloat {
+    let leftover =
+      isLandscape(container) ? container.width - frame.width : container.height - frame.height
+    return max(leftover, minControlThickness)
   }
 
   private func viewfinder(_ frame: CGSize) -> some View {
@@ -132,17 +134,17 @@ struct ContentView: View {
   private func pictureInPicture(
     _ previewLayer: AVCaptureVideoPreviewLayer, in frame: CGSize
   ) -> some View {
-    let pipSize = PiPLayout.size(inContainerOfWidth: frame.width)
+    let pipSize = PiPLayout.size(in: frame)
     let anchor = PiPLayout.center(for: pipCorner, in: frame)
     let shape = RoundedRectangle(
-      cornerRadius: PiPLayout.cornerRadius(forPiPWidth: pipSize.width), style: .continuous)
+      cornerRadius: PiPLayout.cornerRadius(forPiP: pipSize), style: .continuous)
 
     return CameraPreviewView(previewLayer: previewLayer)
       .frame(width: pipSize.width, height: pipSize.height)
       .clipShape(shape)
       .overlay(
         shape.strokeBorder(
-          Color.white, lineWidth: PiPLayout.borderWidth(forPiPWidth: pipSize.width))
+          Color.white, lineWidth: PiPLayout.borderWidth(forPiP: pipSize))
       )
       .shadow(color: .black.opacity(0.3), radius: 8, y: 2)
       .scaleEffect(isDraggingPiP ? 1.1 : 1)
@@ -180,7 +182,7 @@ struct ContentView: View {
   // Keeping the PiP inside the frame keeps it inside the saved photo.
   private func clamped(_ translation: CGSize, in frame: CGSize) -> CGSize {
     let anchor = PiPLayout.center(for: pipCorner, in: frame)
-    let pip = PiPLayout.size(inContainerOfWidth: frame.width)
+    let pip = PiPLayout.size(in: frame)
     let x = min(max(anchor.x + translation.width, pip.width / 2), frame.width - pip.width / 2)
     let y = min(max(anchor.y + translation.height, pip.height / 2), frame.height - pip.height / 2)
     return CGSize(width: x - anchor.x, height: y - anchor.y)

@@ -156,14 +156,23 @@ class CameraManager: ObservableObject {
     guard !candidates.isEmpty, (try? device.lockForConfiguration()) != nil else { return }
     defer { device.unlockForConfiguration() }
 
+    // hardwareCost decides whether the session can run at all; systemPressureCost only says
+    // whether it can run sustainably, and rises on a warm phone. Treating pressure as a veto
+    // would hand a hot device back its 16:9 default, so it only breaks ties.
+    var sustainable: AVCaptureDevice.Format?
+
     for candidate in candidates {
       device.activeFormat = candidate
-      if session.hardwareCost <= 1 && session.systemPressureCost <= 1 {
+      guard session.hardwareCost <= 1 else { continue }
+      if session.systemPressureCost <= 1 {
         return
+      }
+      if sustainable == nil {
+        sustainable = candidate
       }
     }
 
-    device.activeFormat = original
+    device.activeFormat = sustainable ?? original
   }
 
   // maxPhotoDimensions defaults to the format's smallest still, which is a fraction of what the
@@ -394,8 +403,8 @@ class CameraManager: ObservableObject {
 
       let pipRect = framing.pipRect.applying(
         CGAffineTransform(scaleX: 1 / previewScale, y: 1 / previewScale))
-      let radius = PiPLayout.cornerRadius(forPiPWidth: pipRect.width)
-      let lineWidth = PiPLayout.borderWidth(forPiPWidth: pipRect.width)
+      let radius = PiPLayout.cornerRadius(forPiP: pipRect.size)
+      let lineWidth = PiPLayout.borderWidth(forPiP: pipRect.size)
 
       context.cgContext.saveGState()
       UIBezierPath(roundedRect: pipRect, cornerRadius: radius).addClip()

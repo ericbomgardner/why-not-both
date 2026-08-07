@@ -14,29 +14,35 @@ struct ViewfinderFraming {
 }
 
 enum PiPLayout {
-  static let widthFraction: CGFloat = 0.28
+  static let shortEdgeFraction: CGFloat = 0.28
   static let aspectRatio: CGFloat = 3.0 / 4.0
   static let marginFraction: CGFloat = 0.04
   static let cornerRadiusFraction: CGFloat = 0.18
   static let borderWidthFraction: CGFloat = 0.03
 
-  static func size(inContainerOfWidth width: CGFloat) -> CGSize {
-    let pipWidth = width * widthFraction
-    return CGSize(width: pipWidth, height: pipWidth / aspectRatio)
+  // Measured off the frame's short edge, so the PiP keeps its size relative to the frame instead
+  // of ballooning when the frame turns landscape. It turns with the frame for the same reason.
+  static func size(in frame: CGSize) -> CGSize {
+    let shortEdge = min(frame.width, frame.height) * shortEdgeFraction
+
+    if frame.width > frame.height {
+      return CGSize(width: shortEdge / aspectRatio, height: shortEdge)
+    }
+    return CGSize(width: shortEdge, height: shortEdge / aspectRatio)
   }
 
   // Both are relative to the PiP itself, so the screen and the saved photo agree at any scale.
-  static func cornerRadius(forPiPWidth width: CGFloat) -> CGFloat {
-    width * cornerRadiusFraction
+  static func cornerRadius(forPiP pip: CGSize) -> CGFloat {
+    min(pip.width, pip.height) * cornerRadiusFraction
   }
 
-  static func borderWidth(forPiPWidth width: CGFloat) -> CGFloat {
-    width * borderWidthFraction
+  static func borderWidth(forPiP pip: CGSize) -> CGFloat {
+    min(pip.width, pip.height) * borderWidthFraction
   }
 
   static func center(for corner: PiPCorner, in container: CGSize) -> CGPoint {
-    let pip = size(inContainerOfWidth: container.width)
-    let margin = container.width * marginFraction
+    let pip = size(in: container)
+    let margin = min(container.width, container.height) * marginFraction
 
     let x: CGFloat
     switch corner {
@@ -58,7 +64,7 @@ enum PiPLayout {
   }
 
   static func rect(for corner: PiPCorner, in container: CGSize) -> CGRect {
-    let pip = size(inContainerOfWidth: container.width)
+    let pip = size(in: container)
     let middle = center(for: corner, in: container)
     let origin = CGPoint(x: middle.x - pip.width / 2, y: middle.y - pip.height / 2)
     return CGRect(origin: origin, size: pip)
