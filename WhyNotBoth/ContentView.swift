@@ -13,6 +13,10 @@ struct ContentView: View {
   private let snapAnimation = Animation.spring(response: 0.3, dampingFraction: 0.8)
   private let flashHold = Duration.milliseconds(60)
   private let flashFade = 0.25
+  private let shutterDiameter: CGFloat = 80
+  private let shutterMargin: CGFloat = 24
+
+  private var controlStripHeight: CGFloat { shutterDiameter + shutterMargin * 2 }
 
   var body: some View {
     GeometryReader { geometry in
@@ -22,18 +26,24 @@ struct ContentView: View {
         if cameraManager.isSessionConfigured {
           let frame = viewfinderSize(in: geometry.size)
 
-          if let backPreviewLayer = cameraManager.backPreviewLayer {
-            CameraPreviewView(previewLayer: backPreviewLayer)
-              .frame(width: frame.width, height: frame.height)
-              .clipped()
-          }
+          VStack(spacing: 0) {
+            ZStack {
+              if let backPreviewLayer = cameraManager.backPreviewLayer {
+                CameraPreviewView(previewLayer: backPreviewLayer)
+                  .frame(width: frame.width, height: frame.height)
+                  .clipped()
+              }
 
-          if let frontPreviewLayer = cameraManager.frontPreviewLayer {
-            pictureInPicture(frontPreviewLayer, in: frame)
-              .frame(width: frame.width, height: frame.height)
-          }
+              if let frontPreviewLayer = cameraManager.frontPreviewLayer {
+                pictureInPicture(frontPreviewLayer, in: frame)
+                  .frame(width: frame.width, height: frame.height)
+              }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-          captureControls(framing: framing(in: frame))
+            shutterButton(framing: framing(in: frame))
+              .frame(height: controlStripHeight)
+          }
         } else {
           statusView
         }
@@ -73,15 +83,21 @@ struct ContentView: View {
     .statusBarHidden()
   }
 
-  // The frame is exactly what gets saved, so the bands around it are the mask.
+  // The frame is exactly what gets saved, so the bands around it are the mask. It fits above the
+  // controls rather than the whole screen, so a tall capture aspect can't push the frame under
+  // the shutter.
   private func viewfinderSize(in container: CGSize) -> CGSize {
     let aspect = cameraManager.viewfinderAspectRatio
-    let heightAtFullWidth = container.width / aspect
+    let available = CGSize(
+      width: container.width,
+      height: max(container.height - controlStripHeight, 0)
+    )
+    let heightAtFullWidth = available.width / aspect
 
-    if heightAtFullWidth <= container.height {
-      return CGSize(width: container.width, height: heightAtFullWidth)
+    if heightAtFullWidth <= available.height {
+      return CGSize(width: available.width, height: heightAtFullWidth)
     }
-    return CGSize(width: container.height * aspect, height: container.height)
+    return CGSize(width: available.height * aspect, height: available.height)
   }
 
   private func framing(in frame: CGSize) -> ViewfinderFraming {
@@ -145,28 +161,23 @@ struct ContentView: View {
     return CGSize(width: x - anchor.x, height: y - anchor.y)
   }
 
-  private func captureControls(framing: ViewfinderFraming) -> some View {
-    VStack {
-      Spacer()
+  private func shutterButton(framing: ViewfinderFraming) -> some View {
+    Button {
+      capturePhoto(framing: framing)
+    } label: {
+      ZStack {
+        Circle()
+          .stroke(Color.white, lineWidth: 4)
+          .frame(width: shutterDiameter, height: shutterDiameter)
 
-      Button {
-        capturePhoto(framing: framing)
-      } label: {
-        ZStack {
-          Circle()
-            .stroke(Color.white, lineWidth: 4)
-            .frame(width: 80, height: 80)
-
-          Circle()
-            .fill(cameraManager.isCapturing ? Color.red : Color.white)
-            .frame(width: 68, height: 68)
-            .scaleEffect(cameraManager.isCapturing ? 0.8 : 1.0)
-            .animation(.easeInOut(duration: 0.2), value: cameraManager.isCapturing)
-        }
+        Circle()
+          .fill(cameraManager.isCapturing ? Color.red : Color.white)
+          .frame(width: shutterDiameter * 0.85, height: shutterDiameter * 0.85)
+          .scaleEffect(cameraManager.isCapturing ? 0.8 : 1.0)
+          .animation(.easeInOut(duration: 0.2), value: cameraManager.isCapturing)
       }
-      .disabled(cameraManager.isCapturing)
-      .padding(.bottom, 24)
     }
+    .disabled(cameraManager.isCapturing)
   }
 
   private var statusView: some View {
@@ -210,7 +221,8 @@ struct ContentView: View {
   }
 
   private func capturePhoto(framing: ViewfinderFraming) {
-    cameraManager.capturePhoto(framing: framing)
+    // Only flash if the shutter was actually accepted, so a rejected tap can't look like a shot.
+    guard cameraManager.capturePhoto(framing: framing) else { return }
 
     flashOpacity = 1
     Task {

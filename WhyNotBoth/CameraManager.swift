@@ -20,7 +20,7 @@ class CameraManager: ObservableObject {
   private var frontCameraOutput: AVCapturePhotoOutput?
   private var isConfiguring = false
   private var isForegrounded = true
-  private var sensorAspectRatio: CGFloat = 4.0 / 3.0
+  private var photoAspectRatio: CGFloat = 4.0 / 3.0
   private var captureDelegates: [Int64: PhotoCaptureDelegate] = [:]
   private var pendingCaptures: [Int64: CheckedContinuation<UIImage?, Never>] = [:]
   private var rotationCoordinators: [AVCaptureDevice.RotationCoordinator] = []
@@ -57,7 +57,7 @@ class CameraManager: ObservableObject {
       frontCameraOutput = setup.frontOutput
       backPreviewLayer = backPreview
       frontPreviewLayer = frontPreview
-      sensorAspectRatio = setup.sensorAspectRatio
+      photoAspectRatio = setup.photoAspectRatio
 
       trackRotation(of: setup.backDevice, isFront: false, previewLayer: backPreview)
       trackRotation(of: setup.frontDevice, isFront: true, previewLayer: frontPreview)
@@ -126,17 +126,28 @@ class CameraManager: ObservableObject {
       device: frontDevice, output: frontOutput, preview: frontPreview, to: session,
       failure: .frontCameraUnavailable)
 
-    let dimensions = CMVideoFormatDescriptionGetDimensions(
-      backDevice.activeFormat.formatDescription)
-
     return SessionSetup(
       session: session,
       backDevice: backDevice,
       frontDevice: frontDevice,
       backOutput: backOutput,
       frontOutput: frontOutput,
-      sensorAspectRatio: CGFloat(dimensions.width) / CGFloat(dimensions.height)
+      photoAspectRatio: aspectRatioOfPhoto(from: backOutput, device: backDevice)
     )
+  }
+
+  // The still can differ in shape from the video format, and it's the still the mask describes.
+  private nonisolated static func aspectRatioOfPhoto(
+    from output: AVCapturePhotoOutput, device: AVCaptureDevice
+  ) -> CGFloat {
+    let photo = output.maxPhotoDimensions
+    if photo.width > 0 && photo.height > 0 {
+      return CGFloat(photo.width) / CGFloat(photo.height)
+    }
+
+    let video = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
+    guard video.width > 0 && video.height > 0 else { return 4.0 / 3.0 }
+    return CGFloat(video.width) / CGFloat(video.height)
   }
 
   private nonisolated static func attach(
@@ -188,20 +199,23 @@ class CameraManager: ObservableObject {
 
     observeRotationAngle(\.videoRotationAngleForHorizonLevelPreview, of: coordinator) {
       [weak self] angle in
-      guard let self else { return }
-      let layer = isFront ? self.frontPreviewLayer : self.backPreviewLayer
+      let layer = isFront ? self?.frontPreviewLayer : self?.backPreviewLayer
       Self.apply(angle, to: layer?.connection)
-
-      if !isFront {
-        let isPortrait = angle.truncatingRemainder(dividingBy: 180) != 0
-        self.viewfinderAspectRatio = isPortrait ? 1 / self.sensorAspectRatio : self.sensorAspectRatio
-      }
     }
 
     observeRotationAngle(\.videoRotationAngleForHorizonLevelCapture, of: coordinator) {
       [weak self] angle in
-      let output = isFront ? self?.frontCameraOutput : self?.backCameraOutput
+      guard let self else { return }
+      let output = isFront ? self.frontCameraOutput : self.backCameraOutput
       Self.apply(angle, to: output?.connection(with: .video))
+
+      // The mask promises what will be saved, so it tracks the capture angle, not the livelier
+      // preview angle — they disagree mid-rotation.
+      if !isFront {
+        let isPortrait = angle.truncatingRemainder(dividingBy: 180) != 0
+        let aspect = self.photoAspectRatio
+        self.viewfinderAspectRatio = isPortrait ? 1 / aspect : aspect
+      }
     }
   }
 
@@ -246,11 +260,11 @@ class CameraManager: ObservableObject {
   }
 
   // MARK: - Capture
-  func capturePhoto(framing: ViewfinderFraming) {
+  func capturePhoto(framing: ViewfinderFraming) -> Bool {
     guard !isCapturing,
       let backOutput = backCameraOutput,
       let frontOutput = frontCameraOutput
-    else { return }
+    else { return false }
 
     isCapturing = true
 
@@ -268,6 +282,8 @@ class CameraManager: ObservableObject {
 
       await save(composite(back: backImage, front: frontImage, framing: framing))
     }
+
+    return true
   }
 
   private func capture(from output: AVCapturePhotoOutput) async -> UIImage? {
@@ -377,7 +393,7 @@ private struct SessionSetup {
   let frontDevice: AVCaptureDevice
   let backOutput: AVCapturePhotoOutput
   let frontOutput: AVCapturePhotoOutput
-  let sensorAspectRatio: CGFloat
+  let photoAspectRatio: CGFloat
 }
 
 // MARK: - Error Types
