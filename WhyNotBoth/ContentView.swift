@@ -1,108 +1,50 @@
+import AVFoundation
 import SwiftUI
 
 struct ContentView: View {
   @StateObject private var cameraManager = CameraManager()
-  @State private var frontCameraPosition = CGPoint(x: 300, y: 100)  // Default top-right
+  @Environment(\.scenePhase) private var scenePhase
+  @State private var pipCorner: PiPCorner = .topTrailing
+  @State private var dragTranslation: CGSize = .zero
+  @State private var isDraggingPiP = false
   @State private var showingPreview = false
   @State private var showingError = false
+
+  private let snapAnimation = Animation.spring(response: 0.3, dampingFraction: 0.8)
 
   var body: some View {
     GeometryReader { geometry in
       ZStack {
-        // Background (black when no camera)
         Color.black.ignoresSafeArea()
 
         if cameraManager.isSessionConfigured {
-          // Back camera preview (fullscreen)
           if let backPreviewLayer = cameraManager.backPreviewLayer {
-            BackCameraPreviewView(previewLayer: backPreviewLayer)
+            CameraPreviewView(previewLayer: backPreviewLayer)
               .ignoresSafeArea()
           }
 
-          // Front camera preview (draggable overlay)
           if let frontPreviewLayer = cameraManager.frontPreviewLayer {
-            let overlaySize = CGSize(
-              width: geometry.size.width * 0.25,
-              height: geometry.size.height * 0.25
-            )
-
-            FrontCameraPreviewView(
-              previewLayer: frontPreviewLayer,
-              position: $frontCameraPosition,
-              size: overlaySize
-            )
-            .frame(width: overlaySize.width, height: overlaySize.height)
-            .position(frontCameraPosition)
+            pictureInPicture(frontPreviewLayer, in: geometry.size)
           }
 
-          // Camera controls overlay
-          VStack {
-            Spacer()
-
-            HStack {
-              Spacer()
-
-              // Capture button
-              Button(action: capturePhoto) {
-                ZStack {
-                  Circle()
-                    .stroke(Color.white, lineWidth: 4)
-                    .frame(width: 80, height: 80)
-
-                  Circle()
-                    .fill(cameraManager.isCapturing ? Color.red : Color.white)
-                    .frame(width: 68, height: 68)
-                    .scaleEffect(cameraManager.isCapturing ? 0.8 : 1.0)
-                    .animation(.easeInOut(duration: 0.2), value: cameraManager.isCapturing)
-                }
-              }
-              .disabled(cameraManager.isCapturing)
-
-              Spacer()
-            }
-            .padding(.bottom, 50)
-          }
+          captureControls
         } else {
-          // Loading or error state
-          VStack {
-            if cameraManager.error != nil {
-              Image(systemName: "camera.fill")
-                .font(.system(size: 60))
-                .foregroundColor(.white)
-
-              Text("Camera Error")
-                .font(.title)
-                .foregroundColor(.white)
-                .padding()
-
-              if let error = cameraManager.error {
-                Text(error.localizedDescription)
-                  .foregroundColor(.gray)
-                  .multilineTextAlignment(.center)
-                  .padding()
-              }
-
-              Button("Retry") {
-                setupCamera()
-              }
-              .foregroundColor(.blue)
-              .padding()
-            } else {
-              ProgressView()
-                .progressViewStyle(CircularProgressViewStyle(tint: .white))
-                .scaleEffect(2.0)
-
-              Text("Setting up cameras...")
-                .foregroundColor(.white)
-                .padding()
-            }
-          }
+          statusView
         }
       }
     }
     .onAppear {
       setupCamera()
-      setDefaultFrontCameraPosition()
+    }
+    .onChange(of: scenePhase) { _, phase in
+      switch phase {
+      case .active:
+        cameraManager.startSession()
+      case .background:
+        cameraManager.stopSession()
+      default:
+        break
+      }
     }
     .sheet(isPresented: $showingPreview) {
       PhotoPreviewView(cameraManager: cameraManager, isPresented: $showingPreview)
@@ -128,6 +70,109 @@ struct ContentView: View {
     .statusBarHidden()
   }
 
+  private func pictureInPicture(
+    _ previewLayer: AVCaptureVideoPreviewLayer, in container: CGSize
+  ) -> some View {
+    let pipSize = PiPLayout.size(inContainerOfWidth: container.width)
+    let anchor = PiPLayout.center(for: pipCorner, in: container)
+    let shape = RoundedRectangle(
+      cornerRadius: PiPLayout.cornerRadius(inContainerOfWidth: container.width), style: .continuous)
+
+    return CameraPreviewView(previewLayer: previewLayer)
+      .frame(width: pipSize.width, height: pipSize.height)
+      .clipShape(shape)
+      .overlay(
+        shape.strokeBorder(
+          Color.white, lineWidth: PiPLayout.borderWidth(inContainerOfWidth: container.width))
+      )
+      .shadow(color: .black.opacity(0.3), radius: 8, y: 2)
+      .scaleEffect(isDraggingPiP ? 1.1 : 1)
+      .animation(.easeInOut(duration: 0.2), value: isDraggingPiP)
+      .position(
+        x: anchor.x + dragTranslation.width,
+        y: anchor.y + dragTranslation.height
+      )
+      .gesture(dragGesture(in: container))
+  }
+
+  private func dragGesture(in container: CGSize) -> some Gesture {
+    // Global space: the view moves and scales mid-drag, which distorts translation in local space.
+    DragGesture(coordinateSpace: .global)
+      .onChanged { value in
+        isDraggingPiP = true
+        dragTranslation = value.translation
+      }
+      .onEnded { value in
+        let anchor = PiPLayout.center(for: pipCorner, in: container)
+        let dropped = CGPoint(
+          x: anchor.x + value.translation.width,
+          y: anchor.y + value.translation.height
+        )
+
+        isDraggingPiP = false
+        withAnimation(snapAnimation) {
+          pipCorner = PiPLayout.nearestCorner(to: dropped, in: container)
+          dragTranslation = .zero
+        }
+      }
+  }
+
+  private var captureControls: some View {
+    VStack {
+      Spacer()
+
+      Button(action: capturePhoto) {
+        ZStack {
+          Circle()
+            .stroke(Color.white, lineWidth: 4)
+            .frame(width: 80, height: 80)
+
+          Circle()
+            .fill(cameraManager.isCapturing ? Color.red : Color.white)
+            .frame(width: 68, height: 68)
+            .scaleEffect(cameraManager.isCapturing ? 0.8 : 1.0)
+            .animation(.easeInOut(duration: 0.2), value: cameraManager.isCapturing)
+        }
+      }
+      .disabled(cameraManager.isCapturing)
+      .padding(.bottom, 24)
+    }
+  }
+
+  private var statusView: some View {
+    VStack {
+      if let error = cameraManager.error {
+        Image(systemName: "camera.fill")
+          .font(.system(size: 60))
+          .foregroundColor(.white)
+
+        Text("Camera Error")
+          .font(.title)
+          .foregroundColor(.white)
+          .padding()
+
+        Text(error.localizedDescription)
+          .foregroundColor(.gray)
+          .multilineTextAlignment(.center)
+          .padding()
+
+        Button("Retry") {
+          setupCamera()
+        }
+        .foregroundColor(.blue)
+        .padding()
+      } else {
+        ProgressView()
+          .progressViewStyle(CircularProgressViewStyle(tint: .white))
+          .scaleEffect(2.0)
+
+        Text("Setting up cameras...")
+          .foregroundColor(.white)
+          .padding()
+      }
+    }
+  }
+
   private func setupCamera() {
     Task {
       await cameraManager.setupCamera()
@@ -135,24 +180,7 @@ struct ContentView: View {
   }
 
   private func capturePhoto() {
-    cameraManager.capturePhoto()
-  }
-
-  private func setDefaultFrontCameraPosition() {
-    // Set initial position to top-right corner
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-      let screenWidth = UIScreen.main.bounds.width
-      let screenHeight = UIScreen.main.bounds.height
-      let overlaySize = CGSize(
-        width: screenWidth * 0.25,
-        height: screenHeight * 0.25
-      )
-
-      frontCameraPosition = CGPoint(
-        x: screenWidth - overlaySize.width / 2 - 20,
-        y: overlaySize.height / 2 + 60  // Account for safe area
-      )
-    }
+    cameraManager.capturePhoto(pipCorner: pipCorner)
   }
 }
 

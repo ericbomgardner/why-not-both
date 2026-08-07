@@ -6,31 +6,31 @@ import UIKit
 @MainActor
 class CameraManager: ObservableObject {
   // MARK: - Published Properties
-  @Published var backPreviewLayer: AVCaptureVideoPreviewLayer?
-  @Published var frontPreviewLayer: AVCaptureVideoPreviewLayer?
+  @Published private(set) var backPreviewLayer: AVCaptureVideoPreviewLayer?
+  @Published private(set) var frontPreviewLayer: AVCaptureVideoPreviewLayer?
   @Published var capturedImage: UIImage?
-  @Published var isCapturing = false
+  @Published private(set) var isCapturing = false
   @Published var error: CameraError?
-  @Published var isSessionConfigured = false
+  @Published private(set) var isSessionConfigured = false
 
   // MARK: - Private Properties
+  private nonisolated let sessionQueue = DispatchQueue(label: "com.toiptoip.WhyNotBoth.session")
   private var multiCamSession: AVCaptureMultiCamSession?
   private var backCameraOutput: AVCapturePhotoOutput?
   private var frontCameraOutput: AVCapturePhotoOutput?
-  private var backCameraInput: AVCaptureDeviceInput?
-  private var frontCameraInput: AVCaptureDeviceInput?
+  private var isConfiguring = false
+  private var captureDelegates: [Int64: PhotoCaptureDelegate] = [:]
+  private var rotationCoordinators: [AVCaptureDevice.RotationCoordinator] = []
+  private var rotationObservations: [NSKeyValueObservation] = []
 
-  // For simultaneous capture
-  private var capturedBackImage: UIImage?
-  private var capturedFrontImage: UIImage?
-  private var captureCount = 0
-  
-  // Delegate instances that need to stay alive during capture
-  private var backCameraDelegate: BackCameraPhotoDelegate?
-  private var frontCameraDelegate: FrontCameraPhotoDelegate?
-
-  // MARK: - Setup Methods
+  // MARK: - Setup
   func setupCamera() async {
+    guard !isSessionConfigured, !isConfiguring else { return }
+
+    isConfiguring = true
+    defer { isConfiguring = false }
+    error = nil
+
     guard await checkCameraPermissions() else {
       error = .permissionDenied
       return
@@ -41,13 +41,34 @@ class CameraManager: ObservableObject {
       return
     }
 
-    await configureSession()
+    let backPreview = AVCaptureVideoPreviewLayer()
+    backPreview.videoGravity = .resizeAspectFill
+    let frontPreview = AVCaptureVideoPreviewLayer()
+    frontPreview.videoGravity = .resizeAspectFill
+
+    do {
+      let setup = try await buildSession(PreviewLayers(back: backPreview, front: frontPreview))
+
+      multiCamSession = setup.session
+      backCameraOutput = setup.backOutput
+      frontCameraOutput = setup.frontOutput
+      backPreviewLayer = backPreview
+      frontPreviewLayer = frontPreview
+
+      trackRotation(of: setup.backDevice, isFront: false, previewLayer: backPreview)
+      trackRotation(of: setup.frontDevice, isFront: true, previewLayer: frontPreview)
+
+      isSessionConfigured = true
+      startSession()
+    } catch let cameraError as CameraError {
+      error = cameraError
+    } catch {
+      self.error = .sessionConfigurationFailed
+    }
   }
 
   private func checkCameraPermissions() async -> Bool {
-    let status = AVCaptureDevice.authorizationStatus(for: .video)
-
-    switch status {
+    switch AVCaptureDevice.authorizationStatus(for: .video) {
     case .authorized:
       return true
     case .notDetermined:
@@ -59,250 +80,261 @@ class CameraManager: ObservableObject {
     }
   }
 
-  private func configureSession() async {
+  private nonisolated func buildSession(_ previews: PreviewLayers) async throws -> SessionSetup {
+    try await withCheckedThrowingContinuation { continuation in
+      sessionQueue.async {
+        do {
+          continuation.resume(returning: try Self.configureSession(previews))
+        } catch {
+          continuation.resume(throwing: error)
+        }
+      }
+    }
+  }
+
+  private nonisolated static func configureSession(_ previews: PreviewLayers) throws -> SessionSetup
+  {
+    let backPreview = previews.back
+    let frontPreview = previews.front
+    guard
+      let backDevice = AVCaptureDevice.default(
+        .builtInWideAngleCamera, for: .video, position: .back)
+    else { throw CameraError.backCameraUnavailable }
+
+    guard
+      let frontDevice = AVCaptureDevice.default(
+        .builtInWideAngleCamera, for: .video, position: .front)
+    else { throw CameraError.frontCameraUnavailable }
+
     let session = AVCaptureMultiCamSession()
-
     session.beginConfiguration()
+    defer { session.commitConfiguration() }
 
-    // Configure back camera
+    let backOutput = AVCapturePhotoOutput()
+    let frontOutput = AVCapturePhotoOutput()
+
+    try attach(
+      device: backDevice, output: backOutput, preview: backPreview, to: session,
+      failure: .backCameraUnavailable)
+    try attach(
+      device: frontDevice, output: frontOutput, preview: frontPreview, to: session,
+      failure: .frontCameraUnavailable)
+
+    return SessionSetup(
+      session: session,
+      backDevice: backDevice,
+      frontDevice: frontDevice,
+      backOutput: backOutput,
+      frontOutput: frontOutput
+    )
+  }
+
+  private nonisolated static func attach(
+    device: AVCaptureDevice,
+    output: AVCapturePhotoOutput,
+    preview: AVCaptureVideoPreviewLayer,
+    to session: AVCaptureMultiCamSession,
+    failure: CameraError
+  ) throws {
+    guard let input = try? AVCaptureDeviceInput(device: device),
+      session.canAddInput(input)
+    else { throw failure }
+    session.addInputWithNoConnections(input)
+
     guard
-      let backCamera = AVCaptureDevice.default(
-        .builtInWideAngleCamera, for: .video, position: .back),
-      let backInput = try? AVCaptureDeviceInput(device: backCamera)
-    else {
-      error = .backCameraUnavailable
-      session.commitConfiguration()
-      return
+      let port = input.ports(
+        for: .video, sourceDeviceType: device.deviceType, sourceDevicePosition: device.position
+      ).first
+    else { throw failure }
+
+    guard session.canAddOutput(output) else { throw failure }
+    session.addOutputWithNoConnections(output)
+
+    let outputConnection = AVCaptureConnection(inputPorts: [port], output: output)
+    guard session.canAddConnection(outputConnection) else { throw failure }
+    session.addConnection(outputConnection)
+
+    preview.setSessionWithNoConnection(session)
+    let previewConnection = AVCaptureConnection(inputPort: port, videoPreviewLayer: preview)
+    guard session.canAddConnection(previewConnection) else { throw failure }
+    session.addConnection(previewConnection)
+
+    if device.position == .front {
+      for connection in [outputConnection, previewConnection]
+      where connection.isVideoMirroringSupported {
+        connection.automaticallyAdjustsVideoMirroring = false
+        connection.isVideoMirrored = true
+      }
+    }
+  }
+
+  // MARK: - Rotation
+  private func trackRotation(
+    of device: AVCaptureDevice, isFront: Bool, previewLayer: AVCaptureVideoPreviewLayer
+  ) {
+    let coordinator = AVCaptureDevice.RotationCoordinator(
+      device: device, previewLayer: previewLayer)
+    rotationCoordinators.append(coordinator)
+
+    observeRotationAngle(\.videoRotationAngleForHorizonLevelPreview, of: coordinator) {
+      [weak self] angle in
+      let layer = isFront ? self?.frontPreviewLayer : self?.backPreviewLayer
+      Self.apply(angle, to: layer?.connection)
     }
 
-    if session.canAddInput(backInput) {
-      session.addInput(backInput)
-      backCameraInput = backInput
+    observeRotationAngle(\.videoRotationAngleForHorizonLevelCapture, of: coordinator) {
+      [weak self] angle in
+      let output = isFront ? self?.frontCameraOutput : self?.backCameraOutput
+      Self.apply(angle, to: output?.connection(with: .video))
     }
+  }
 
-    // Configure front camera
-    guard
-      let frontCamera = AVCaptureDevice.default(
-        .builtInWideAngleCamera, for: .video, position: .front),
-      let frontInput = try? AVCaptureDeviceInput(device: frontCamera)
-    else {
-      error = .frontCameraUnavailable
-      session.commitConfiguration()
-      return
-    }
+  private func observeRotationAngle(
+    _ keyPath: KeyPath<AVCaptureDevice.RotationCoordinator, CGFloat>,
+    of coordinator: AVCaptureDevice.RotationCoordinator,
+    applying apply: @escaping @MainActor (CGFloat) -> Void
+  ) {
+    apply(coordinator[keyPath: keyPath])
 
-    if session.canAddInput(frontInput) {
-      session.addInput(frontInput)
-      frontCameraInput = frontInput
-    }
-
-    // Configure photo outputs
-    let backPhotoOutput = AVCapturePhotoOutput()
-    let frontPhotoOutput = AVCapturePhotoOutput()
-
-    if session.canAddOutput(backPhotoOutput) {
-      session.addOutput(backPhotoOutput)
-      backCameraOutput = backPhotoOutput
-    }
-
-    if session.canAddOutput(frontPhotoOutput) {
-      session.addOutput(frontPhotoOutput)
-      frontCameraOutput = frontPhotoOutput
-    }
-
-    // Explicitly connect inputs to photo outputs (required for multi-cam)
-    if let backInput = backCameraInput,
-      let backPort = backInput.ports.first(where: { port in
-        port.mediaType == .video && port.sourceDeviceType == .builtInWideAngleCamera
-          && port.sourceDevicePosition == .back
+    rotationObservations.append(
+      coordinator.observe(keyPath, options: .new) { _, change in
+        guard let angle = change.newValue else { return }
+        Task { @MainActor in apply(angle) }
       })
-    {
-      let backOutputConnection = AVCaptureConnection(
-        inputPorts: [backPort], output: backPhotoOutput)
-      if session.canAddConnection(backOutputConnection) {
-        session.addConnection(backOutputConnection)
-      }
-    }
+  }
 
-    if let frontInput = frontCameraInput,
-      let frontPort = frontInput.ports.first(where: { port in
-        port.mediaType == .video && port.sourceDeviceType == .builtInWideAngleCamera
-          && port.sourceDevicePosition == .front
-      })
-    {
-      let frontOutputConnection = AVCaptureConnection(
-        inputPorts: [frontPort], output: frontPhotoOutput)
-      if session.canAddConnection(frontOutputConnection) {
-        session.addConnection(frontOutputConnection)
-      }
-    }
+  private static func apply(_ angle: CGFloat, to connection: AVCaptureConnection?) {
+    guard let connection, connection.isVideoRotationAngleSupported(angle) else { return }
+    connection.videoRotationAngle = angle
+  }
 
-    session.commitConfiguration()
-
-    // Create preview layers with no automatic connection; we'll attach explicit connections
-    let backPreview = AVCaptureVideoPreviewLayer()
-    backPreview.videoGravity = .resizeAspectFill
-    backPreview.setSessionWithNoConnection(session)
-
-    let frontPreview = AVCaptureVideoPreviewLayer()
-    frontPreview.videoGravity = .resizeAspectFill
-    frontPreview.setSessionWithNoConnection(session)
-
-    // Create explicit connections from input ports to the corresponding preview layers
-    if let backPort = backInput.ports.first(where: { port in
-      port.mediaType == .video && port.sourceDeviceType == .builtInWideAngleCamera
-        && port.sourceDevicePosition == .back
-    }) {
-      let backConnection = AVCaptureConnection(inputPort: backPort, videoPreviewLayer: backPreview)
-      if session.canAddConnection(backConnection) {
-        session.addConnection(backConnection)
-      }
-    }
-
-    if let frontPort = frontInput.ports.first(where: { port in
-      port.mediaType == .video && port.sourceDeviceType == .builtInWideAngleCamera
-        && port.sourceDevicePosition == .front
-    }) {
-      let frontConnection = AVCaptureConnection(
-        inputPort: frontPort, videoPreviewLayer: frontPreview)
-      if session.canAddConnection(frontConnection) {
-        session.addConnection(frontConnection)
-      }
-    }
-
-    multiCamSession = session
-    backPreviewLayer = backPreview
-    frontPreviewLayer = frontPreview
-    isSessionConfigured = true
-
-    // Start the session
-    DispatchQueue.global(qos: .userInitiated).async {
+  // MARK: - Session Lifecycle
+  func startSession() {
+    guard let session = multiCamSession else { return }
+    sessionQueue.async {
+      guard !session.isRunning else { return }
       session.startRunning()
     }
   }
 
-  // MARK: - Capture Methods
-  func capturePhoto() {
+  func stopSession() {
+    guard let session = multiCamSession else { return }
+    sessionQueue.async {
+      guard session.isRunning else { return }
+      session.stopRunning()
+    }
+  }
+
+  // MARK: - Capture
+  func capturePhoto(pipCorner: PiPCorner) {
     guard !isCapturing,
       let backOutput = backCameraOutput,
       let frontOutput = frontCameraOutput
     else { return }
 
     isCapturing = true
-    captureCount = 0
-    capturedBackImage = nil
-    capturedFrontImage = nil
 
-    // Create and store delegate references to prevent deallocation
-    backCameraDelegate = BackCameraPhotoDelegate(manager: self)
-    frontCameraDelegate = FrontCameraPhotoDelegate(manager: self)
+    Task {
+      async let back = capture(from: backOutput)
+      async let front = capture(from: frontOutput)
+      let (backImage, frontImage) = await (back, front)
 
-    let settings = AVCapturePhotoSettings()
-    settings.flashMode = .off
+      isCapturing = false
 
-    // Capture from both cameras simultaneously
-    backOutput.capturePhoto(with: settings, delegate: backCameraDelegate!)
-    frontOutput.capturePhoto(with: settings, delegate: frontCameraDelegate!)
-  }
-
-  func didCaptureBackPhoto(_ image: UIImage) {
-    capturedBackImage = image
-    captureCount += 1
-    checkCaptureCompletion()
-  }
-
-  func didCaptureFrontPhoto(_ image: UIImage) {
-    capturedFrontImage = image
-    captureCount += 1
-    checkCaptureCompletion()
-  }
-
-  private func checkCaptureCompletion() {
-    guard captureCount == 2,
-      let backImage = capturedBackImage,
-      let frontImage = capturedFrontImage
-    else { return }
-
-    // Combine the images
-    let combinedImage = combineImages(backImage: backImage, frontImage: frontImage)
-    capturedImage = combinedImage
-    isCapturing = false
-    
-    // Clean up delegate references after capture is complete
-    backCameraDelegate = nil
-    frontCameraDelegate = nil
-  }
-
-  private func combineImages(backImage: UIImage, frontImage: UIImage) -> UIImage? {
-    let backSize = backImage.size
-
-    UIGraphicsBeginImageContextWithOptions(backSize, false, backImage.scale)
-
-    // Draw the back image (full screen)
-    backImage.draw(in: CGRect(origin: .zero, size: backSize))
-
-    // Calculate front image overlay position (top-right corner, 1/4 size)
-    let overlaySize = CGSize(width: backSize.width * 0.25, height: backSize.height * 0.25)
-    let overlayOrigin = CGPoint(
-      x: backSize.width - overlaySize.width - 20,
-      y: 20
-    )
-    let overlayRect = CGRect(origin: overlayOrigin, size: overlaySize)
-
-    // Create rounded rect path
-    let path = UIBezierPath(roundedRect: overlayRect, cornerRadius: 20)
-    path.addClip()
-
-    // Draw the front image (flipped horizontally to look like a mirror)
-    UIGraphicsGetCurrentContext()?.translateBy(x: overlayRect.midX, y: overlayRect.midY)
-    UIGraphicsGetCurrentContext()?.scaleBy(x: -1, y: 1)
-    UIGraphicsGetCurrentContext()?.translateBy(x: -overlayRect.midX, y: -overlayRect.midY)
-
-    frontImage.draw(in: overlayRect)
-
-    let combinedImage = UIGraphicsGetImageFromCurrentImageContext()
-    UIGraphicsEndImageContext()
-
-    return combinedImage
-  }
-
-  // MARK: - Save Methods
-  func saveImageToLibrary() async {
-    guard let image = capturedImage else { return }
-
-    let status = PHPhotoLibrary.authorizationStatus(for: .addOnly)
-
-    switch status {
-    case .authorized, .limited:
-      await saveImage(image)
-    case .notDetermined:
-      let newStatus = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
-      if newStatus == .authorized || newStatus == .limited {
-        await saveImage(image)
-      } else {
-        error = .photoLibraryPermissionDenied
+      guard let backImage, let frontImage else {
+        error = .captureFailed
+        return
       }
-    case .denied, .restricted:
-      error = .photoLibraryPermissionDenied
-    @unknown default:
-      error = .photoLibraryPermissionDenied
+
+      capturedImage = composite(back: backImage, front: frontImage, corner: pipCorner)
     }
   }
 
-  private func saveImage(_ image: UIImage) async {
+  private func capture(from output: AVCapturePhotoOutput) async -> UIImage? {
+    let settings = AVCapturePhotoSettings()
+    settings.flashMode = .off
+    settings.photoQualityPrioritization = output.maxPhotoQualityPrioritization
+    let id = settings.uniqueID
+
+    let image = await withCheckedContinuation { continuation in
+      let delegate = PhotoCaptureDelegate { image in
+        continuation.resume(returning: image)
+      }
+      captureDelegates[id] = delegate
+      output.capturePhoto(with: settings, delegate: delegate)
+    }
+
+    captureDelegates[id] = nil
+    return image
+  }
+
+  private func composite(back: UIImage, front: UIImage, corner: PiPCorner) -> UIImage {
+    let canvas = back.size
+    let format = UIGraphicsImageRendererFormat.preferred()
+    format.scale = back.scale
+    format.opaque = true
+
+    return UIGraphicsImageRenderer(size: canvas, format: format).image { context in
+      back.draw(in: CGRect(origin: .zero, size: canvas))
+
+      let pipRect = PiPLayout.rect(for: corner, in: canvas)
+      let radius = PiPLayout.cornerRadius(inContainerOfWidth: canvas.width)
+      let lineWidth = PiPLayout.borderWidth(inContainerOfWidth: canvas.width)
+
+      context.cgContext.saveGState()
+      UIBezierPath(roundedRect: pipRect, cornerRadius: radius).addClip()
+      front.drawAspectFill(in: pipRect)
+      context.cgContext.restoreGState()
+
+      let border = UIBezierPath(
+        roundedRect: pipRect.insetBy(dx: lineWidth / 2, dy: lineWidth / 2),
+        cornerRadius: radius - lineWidth / 2
+      )
+      border.lineWidth = lineWidth
+      UIColor.white.setStroke()
+      border.stroke()
+    }
+  }
+
+  // MARK: - Saving
+  func saveImageToLibrary() async -> Bool {
+    guard let image = capturedImage else { return false }
+
+    var status = PHPhotoLibrary.authorizationStatus(for: .addOnly)
+    if status == .notDetermined {
+      status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+    }
+
+    guard status == .authorized || status == .limited else {
+      error = .photoLibraryPermissionDenied
+      return false
+    }
+
     do {
       try await PHPhotoLibrary.shared().performChanges {
         PHAssetCreationRequest.creationRequestForAsset(from: image)
       }
+      return true
     } catch {
       self.error = .failedToSavePhoto
+      return false
     }
   }
+}
 
-  // MARK: - Cleanup
-  func stopSession() {
-    multiCamSession?.stopRunning()
-  }
+// MARK: - Session Setup
+// Safe to hand to the session queue only because the layers reach SwiftUI after configuration ends.
+private struct PreviewLayers: @unchecked Sendable {
+  let back: AVCaptureVideoPreviewLayer
+  let front: AVCaptureVideoPreviewLayer
+}
+
+private struct SessionSetup {
+  let session: AVCaptureMultiCamSession
+  let backDevice: AVCaptureDevice
+  let frontDevice: AVCaptureDevice
+  let backOutput: AVCapturePhotoOutput
+  let frontOutput: AVCapturePhotoOutput
 }
 
 // MARK: - Error Types
@@ -311,6 +343,8 @@ enum CameraError: LocalizedError {
   case multiCamNotSupported
   case backCameraUnavailable
   case frontCameraUnavailable
+  case sessionConfigurationFailed
+  case captureFailed
   case photoLibraryPermissionDenied
   case failedToSavePhoto
 
@@ -324,6 +358,10 @@ enum CameraError: LocalizedError {
       return "Back camera is not available."
     case .frontCameraUnavailable:
       return "Front camera is not available."
+    case .sessionConfigurationFailed:
+      return "Failed to set up the cameras."
+    case .captureFailed:
+      return "Failed to capture from both cameras. Please try again."
     case .photoLibraryPermissionDenied:
       return "Photo library permission denied. Please enable photo access in Settings."
     case .failedToSavePhoto:
@@ -332,59 +370,42 @@ enum CameraError: LocalizedError {
   }
 }
 
-// MARK: - Photo Capture Delegates
-class BackCameraPhotoDelegate: NSObject, AVCapturePhotoCaptureDelegate {
-  private weak var manager: CameraManager?
+// MARK: - Photo Capture Delegate
+private final class PhotoCaptureDelegate: NSObject, AVCapturePhotoCaptureDelegate {
+  private let completion: @Sendable (UIImage?) -> Void
+  private var image: UIImage?
 
-  init(manager: CameraManager) {
-    self.manager = manager
+  init(completion: @escaping @Sendable (UIImage?) -> Void) {
+    self.completion = completion
   }
 
   func photoOutput(
     _ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?
   ) {
-    if let error = error {
-      print("Back camera capture error: \(error)")
-      return
-    }
+    guard error == nil, let data = photo.fileDataRepresentation() else { return }
+    image = UIImage(data: data)
+  }
 
-    guard let imageData = photo.fileDataRepresentation(),
-      let image = UIImage(data: imageData)
-    else {
-      print("Failed to create image from back camera data")
-      return
-    }
-
-    Task { @MainActor in
-      manager?.didCaptureBackPhoto(image)
-    }
+  // Always called last, even when capture fails outright, so the continuation resumes exactly once.
+  func photoOutput(
+    _ output: AVCapturePhotoOutput,
+    didFinishCaptureFor resolvedSettings: AVCaptureResolvedPhotoSettings, error: Error?
+  ) {
+    completion(image)
   }
 }
 
-class FrontCameraPhotoDelegate: NSObject, AVCapturePhotoCaptureDelegate {
-  private weak var manager: CameraManager?
-
-  init(manager: CameraManager) {
-    self.manager = manager
-  }
-
-  func photoOutput(
-    _ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?
-  ) {
-    if let error = error {
-      print("Front camera capture error: \(error)")
-      return
-    }
-
-    guard let imageData = photo.fileDataRepresentation(),
-      let image = UIImage(data: imageData)
-    else {
-      print("Failed to create image from front camera data")
-      return
-    }
-
-    Task { @MainActor in
-      manager?.didCaptureFrontPhoto(image)
-    }
+// MARK: - Drawing
+extension UIImage {
+  fileprivate func drawAspectFill(in rect: CGRect) {
+    let scale = max(rect.width / size.width, rect.height / size.height)
+    let filled = CGSize(width: size.width * scale, height: size.height * scale)
+    draw(
+      in: CGRect(
+        x: rect.midX - filled.width / 2,
+        y: rect.midY - filled.height / 2,
+        width: filled.width,
+        height: filled.height
+      ))
   }
 }

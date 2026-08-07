@@ -69,11 +69,9 @@ struct PhotoPreviewView: View {
 
   private func savePhoto() {
     Task {
-      await cameraManager.saveImageToLibrary()
-      await MainActor.run {
-        cameraManager.capturedImage = nil
-        isPresented = false
-      }
+      guard await cameraManager.saveImageToLibrary() else { return }
+      cameraManager.capturedImage = nil
+      isPresented = false
     }
   }
 }

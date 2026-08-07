@@ -12,8 +12,8 @@
 	"argv": [
 		"/opt/homebrew/bin/xcode-build-server"
 	],
-	"workspace": "/Users/eric/Projects/WhyNotBoth/WhyNotBoth.xcodeproj/project.xcworkspace",
-	"build_root": "/Users/eric/Library/Developer/Xcode/DerivedData/WhyNotBoth-cthjcicohrqkomasskjymajvnyzp",
+	"workspace": "/Users/eric/Projects/why-not-both/WhyNotBoth.xcodeproj/project.xcworkspace",
+	"build_root": "/Users/eric/Library/Developer/Xcode/DerivedData/WhyNotBoth-achrngerpxjelwcvmheyzdxfstzu",
 	"scheme": "WhyNotBoth",
 	"kind": "xcode"
 }
