@@ -7,12 +7,12 @@ struct ContentView: View {
   @State private var pipCorner: PiPCorner = .topTrailing
   @State private var dragTranslation: CGSize = .zero
   @State private var isDraggingPiP = false
-  @State private var flashOpacity: Double = 0
+  @State private var shutterOpacity: Double = 0
   @State private var showingError = false
 
   private let snapAnimation = Animation.spring(response: 0.3, dampingFraction: 0.8)
-  private let flashHold = Duration.milliseconds(60)
-  private let flashFade = 0.25
+  private let shutterHold = Duration.milliseconds(60)
+  private let shutterFade = 0.25
   private let shutterDiameter: CGFloat = 80
   private let shutterMargin: CGFloat = 24
 
@@ -38,11 +38,6 @@ struct ContentView: View {
         } else {
           statusView
         }
-
-        Color.white
-          .ignoresSafeArea()
-          .opacity(flashOpacity)
-          .allowsHitTesting(false)
       }
     }
     .onAppear {
@@ -96,6 +91,12 @@ struct ContentView: View {
         pictureInPicture(frontPreviewLayer, in: frame)
           .frame(width: frame.width, height: frame.height)
       }
+
+      // Blacking out only the frame keeps the shutter from blinding you, the way Photos does.
+      Color.black
+        .frame(width: frame.width, height: frame.height)
+        .opacity(shutterOpacity)
+        .allowsHitTesting(false)
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
   }
@@ -224,11 +225,11 @@ struct ContentView: View {
     // Only flash if the shutter was actually accepted, so a rejected tap can't look like a shot.
     guard cameraManager.capturePhoto(framing: framing) else { return }
 
-    flashOpacity = 1
+    shutterOpacity = 1
     Task {
-      try? await Task.sleep(for: flashHold)
-      withAnimation(.easeOut(duration: flashFade)) {
-        flashOpacity = 0
+      try? await Task.sleep(for: shutterHold)
+      withAnimation(.easeOut(duration: shutterFade)) {
+        shutterOpacity = 0
       }
     }
   }
