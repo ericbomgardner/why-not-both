@@ -250,9 +250,9 @@ class CameraManager: ObservableObject {
       connection.videoRotationAngle = portraitRotationAngle
     }
 
-    // The selfie reads like a mirror, so the preview is mirrored. The still is deliberately left
-    // alone and flipped when compositing instead — asking the photo connection to mirror silently
-    // does nothing, which is how the two came to disagree.
+    // A mirrored preview is what makes a selfie framable, but mirroring is also what puts writing
+    // backwards, so the still is explicitly left unmirrored — the way every phone camera does it.
+    // Set rather than left to the guard above, which silently skips when it isn't supported.
     if device.position == .front {
       if previewConnection.isVideoMirroringSupported {
         previewConnection.automaticallyAdjustsVideoMirroring = false
@@ -426,10 +426,6 @@ class CameraManager: ObservableObject {
 
       context.cgContext.saveGState()
       UIBezierPath(roundedRect: pipRect, cornerRadius: radius).addClip()
-      // Flipping about the PiP's own centre leaves the clip covering the same pixels.
-      context.cgContext.translateBy(x: pipRect.midX, y: 0)
-      context.cgContext.scaleBy(x: -1, y: 1)
-      context.cgContext.translateBy(x: -pipRect.midX, y: 0)
       front.drawAspectFill(in: pipRect)
       context.cgContext.restoreGState()
 
