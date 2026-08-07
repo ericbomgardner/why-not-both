@@ -16,7 +16,7 @@ struct ContentView: View {
   private let shutterDiameter: CGFloat = 80
   private let shutterMargin: CGFloat = 24
 
-  private var controlStripHeight: CGFloat { shutterDiameter + shutterMargin * 2 }
+  private var controlStripThickness: CGFloat { shutterDiameter + shutterMargin * 2 }
 
   var body: some View {
     GeometryReader { geometry in
@@ -26,23 +26,18 @@ struct ContentView: View {
         if cameraManager.isSessionConfigured {
           let frame = viewfinderSize(in: geometry.size)
 
-          VStack(spacing: 0) {
-            ZStack {
-              if let backPreviewLayer = cameraManager.backPreviewLayer {
-                CameraPreviewView(previewLayer: backPreviewLayer)
-                  .frame(width: frame.width, height: frame.height)
-                  .clipped()
-              }
-
-              if let frontPreviewLayer = cameraManager.frontPreviewLayer {
-                pictureInPicture(frontPreviewLayer, in: frame)
-                  .frame(width: frame.width, height: frame.height)
-              }
+          if isLandscape(geometry.size) {
+            HStack(spacing: 0) {
+              viewfinder(frame)
+              shutterButton(framing: framing(in: frame))
+                .frame(width: controlStripThickness)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-            shutterButton(framing: framing(in: frame))
-              .frame(height: controlStripHeight)
+          } else {
+            VStack(spacing: 0) {
+              viewfinder(frame)
+              shutterButton(framing: framing(in: frame))
+                .frame(height: controlStripThickness)
+            }
           }
         } else {
           statusView
@@ -83,21 +78,45 @@ struct ContentView: View {
     .statusBarHidden()
   }
 
-  // The frame is exactly what gets saved, so the bands around it are the mask. It fits above the
-  // controls rather than the whole screen, so a tall capture aspect can't push the frame under
-  // the shutter.
-  private func viewfinderSize(in container: CGSize) -> CGSize {
-    let aspect = cameraManager.viewfinderAspectRatio
-    let available = CGSize(
-      width: container.width,
-      height: max(container.height - controlStripHeight, 0)
-    )
-    let heightAtFullWidth = available.width / aspect
+  private func isLandscape(_ container: CGSize) -> Bool {
+    container.width > container.height
+  }
 
-    if heightAtFullWidth <= available.height {
-      return CGSize(width: available.width, height: heightAtFullWidth)
+  // The controls sit along the short edge so they never eat the width the frame needs.
+  private func availableSize(in container: CGSize) -> CGSize {
+    if isLandscape(container) {
+      return CGSize(
+        width: max(container.width - controlStripThickness, 0), height: container.height)
     }
-    return CGSize(width: available.height * aspect, height: available.height)
+    return CGSize(
+      width: container.width, height: max(container.height - controlStripThickness, 0))
+  }
+
+  // The frame is exactly what gets saved, so the bands around it are the mask. Clamping the aspect
+  // so the frame is never taller than the space available is what keeps bars off the sides — a
+  // capture taller than that gets cropped to fit rather than pillarboxed.
+  private func viewfinderSize(in container: CGSize) -> CGSize {
+    let available = availableSize(in: container)
+    guard available.width > 0, available.height > 0 else { return .zero }
+
+    let aspect = max(cameraManager.viewfinderAspectRatio, available.width / available.height)
+    return CGSize(width: available.width, height: available.width / aspect)
+  }
+
+  private func viewfinder(_ frame: CGSize) -> some View {
+    ZStack {
+      if let backPreviewLayer = cameraManager.backPreviewLayer {
+        CameraPreviewView(previewLayer: backPreviewLayer)
+          .frame(width: frame.width, height: frame.height)
+          .clipped()
+      }
+
+      if let frontPreviewLayer = cameraManager.frontPreviewLayer {
+        pictureInPicture(frontPreviewLayer, in: frame)
+          .frame(width: frame.width, height: frame.height)
+      }
+    }
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
   }
 
   private func framing(in frame: CGSize) -> ViewfinderFraming {
